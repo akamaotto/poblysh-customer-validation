@@ -1,0 +1,8 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Poblysh Validation icon">
+  <rect x="12" y="12" width="104" height="104" rx="12" fill="#111111"/>
+  <rect x="24" y="24" width="80" height="80" fill="#ffffff"/>
+  <rect x="40" y="36" width="48" height="10" rx="3" fill="#111111"/>
+  <rect x="36" y="54" width="56" height="10" rx="3" fill="#111111"/>
+  <rect x="36" y="72" width="56" height="10" rx="3" fill="#111111"/>
+  <rect x="36" y="90" width="56" height="10" rx="3" fill="#111111"/>
+</svg>
