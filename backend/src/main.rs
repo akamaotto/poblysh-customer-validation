@@ -1,15 +1,18 @@
 mod auth;
+mod email_service;
 mod entities;
 mod user_management;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post, put},
     Json, Router,
 };
 use chrono::Utc;
-use entities::{contact, interview, interview_insight, outreach_log, startup, weekly_synthesis};
+use entities::{
+    contact, interview, interview_insight, outreach_log, startup, user, weekly_synthesis,
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
     QueryOrder, Set,
@@ -17,14 +20,16 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
-use tracing_subscriber;
+
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
+use crate::auth::middleware::{AdminUser, AuthUser};
+use crate::email_service::{EmailService, EmailServiceError, EmailTemplateKind};
 
 #[derive(Clone)]
 struct AppState {
     db: DatabaseConnection,
+    email_service: EmailService,
 }
 
 impl axum::extract::FromRef<AppState> for DatabaseConnection {
@@ -62,6 +67,68 @@ struct CreateContactRequest {
     notes: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct UpdateContactRequest {
+    name: Option<String>,
+    role: Option<String>,
+    email: Option<String>,
+    phone: Option<String>,
+    linkedin_url: Option<String>,
+    is_primary: Option<bool>,
+    notes: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ContactListQuery {
+    trashed: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ContactResponse {
+    id: Uuid,
+    startup_id: Uuid,
+    name: String,
+    role: String,
+    email: Option<String>,
+    phone: Option<String>,
+    linkedin_url: Option<String>,
+    is_primary: bool,
+    notes: Option<String>,
+    is_trashed: bool,
+    owner_id: Option<Uuid>,
+    owner_name: Option<String>,
+    owner_email: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BulkContactActionRequest {
+    contact_ids: Vec<Uuid>,
+}
+
+impl From<(contact::Model, Option<user::Model>)> for ContactResponse {
+    fn from((contact, owner): (contact::Model, Option<user::Model>)) -> Self {
+        let (owner_name, owner_email) = owner
+            .map(|o| (o.name.clone(), Some(o.email)))
+            .unwrap_or((None, None));
+
+        ContactResponse {
+            id: contact.id,
+            startup_id: contact.startup_id,
+            name: contact.name,
+            role: contact.role,
+            email: contact.email,
+            phone: contact.phone,
+            linkedin_url: contact.linkedin_url,
+            is_primary: contact.is_primary,
+            notes: contact.notes,
+            is_trashed: contact.is_trashed,
+            owner_id: contact.owner_id,
+            owner_name,
+            owner_email,
+        }
+    }
+}
+
 // OutreachLog DTOs
 #[derive(Deserialize)]
 struct CreateOutreachLogRequest {
@@ -70,7 +137,33 @@ struct CreateOutreachLogRequest {
     channel: String,
     direction: String,
     message_summary: Option<String>,
+    message_id: Option<String>,
+    subject: Option<String>,
+    delivery_status: Option<String>,
     outcome: String,
+}
+
+#[derive(Deserialize)]
+struct SendContactEmailRequest {
+    subject: Option<String>,
+    body_html: Option<String>,
+    body_text: Option<String>,
+    #[serde(default)]
+    template: EmailTemplateKind,
+}
+
+#[derive(Serialize)]
+struct SendContactEmailResponse {
+    message_id: String,
+    delivery_status: String,
+    outreach_log: outreach_log::Model,
+}
+
+#[derive(Serialize)]
+struct EmailStatusResponse {
+    message_id: String,
+    delivery_status: String,
+    subject: Option<String>,
 }
 
 // Interview DTOs
@@ -231,35 +324,40 @@ async fn delete_startup(
 // Contact handlers
 async fn list_contacts(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
-) -> Result<Json<Vec<contact::Model>>, StatusCode> {
-    let contacts = contact::Entity::find()
-        .all(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    AuthUser(user): AuthUser,
+    query: Option<Query<ContactListQuery>>,
+) -> Result<Json<Vec<ContactResponse>>, StatusCode> {
+    let params = query.map(|q| q.0).unwrap_or_default();
+    let trashed = params.trashed.unwrap_or(false);
+    if trashed && !user.is_admin() {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
+    let contacts = fetch_contacts(&state.db, None, trashed).await?;
     Ok(Json(contacts))
 }
 
 async fn list_contacts_for_startup(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
     Path(startup_id): Path<Uuid>,
-) -> Result<Json<Vec<contact::Model>>, StatusCode> {
-    let contacts = contact::Entity::find()
-        .filter(contact::Column::StartupId.eq(startup_id))
-        .all(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    query: Option<Query<ContactListQuery>>,
+) -> Result<Json<Vec<ContactResponse>>, StatusCode> {
+    let params = query.map(|q| q.0).unwrap_or_default();
+    let trashed = params.trashed.unwrap_or(false);
+    if trashed && !user.is_admin() {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
+    let contacts = fetch_contacts(&state.db, Some(startup_id), trashed).await?;
     Ok(Json(contacts))
 }
 
 async fn create_contact(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
     Json(payload): Json<CreateContactRequest>,
-) -> Result<Json<contact::Model>, StatusCode> {
+) -> Result<Json<ContactResponse>, StatusCode> {
     let contact = contact::ActiveModel {
         id: Set(Uuid::new_v4()),
         startup_id: Set(payload.startup_id),
@@ -270,19 +368,104 @@ async fn create_contact(
         linkedin_url: Set(payload.linkedin_url),
         is_primary: Set(payload.is_primary.unwrap_or(false)),
         notes: Set(payload.notes),
+        is_trashed: Set(false),
+        owner_id: Set(Some(user.id)),
     };
 
-    let result = contact
+    let inserted = contact
         .insert(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(result))
+    let response = load_contact_with_owner(&state.db, inserted.id).await?;
+    Ok(Json(response))
 }
 
-async fn delete_contact(
+async fn update_contact(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateContactRequest>,
+) -> Result<Json<ContactResponse>, StatusCode> {
+    let existing = contact::Entity::find_by_id(id)
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !can_edit_contact(&user, &existing) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let mut active: contact::ActiveModel = existing.into();
+    if let Some(name) = payload.name {
+        active.name = Set(name);
+    }
+    if let Some(role) = payload.role {
+        active.role = Set(role);
+    }
+    if let Some(email) = payload.email {
+        active.email = Set(Some(email));
+    }
+    if let Some(phone) = payload.phone {
+        active.phone = Set(Some(phone));
+    }
+    if let Some(linkedin_url) = payload.linkedin_url {
+        active.linkedin_url = Set(Some(linkedin_url));
+    }
+    if let Some(is_primary) = payload.is_primary {
+        active.is_primary = Set(is_primary);
+    }
+    if let Some(notes) = payload.notes {
+        active.notes = Set(Some(notes));
+    }
+
+    let updated = active
+        .update(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let response = load_contact_with_owner(&state.db, updated.id).await?;
+    Ok(Json(response))
+}
+
+async fn trash_contact(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ContactResponse>, StatusCode> {
+    let existing = contact::Entity::find_by_id(id)
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !can_trash_contact(&user, &existing) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let response = set_contact_trash_state(&state.db, existing, true).await?;
+    Ok(Json(response))
+}
+
+async fn restore_contact(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<ContactResponse>, StatusCode> {
+    let existing = contact::Entity::find_by_id(id)
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let response = set_contact_trash_state(&state.db, existing, false).await?;
+    Ok(Json(response))
+}
+
+async fn permanently_delete_contact(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, StatusCode> {
     let existing = contact::Entity::find_by_id(id)
@@ -291,6 +474,10 @@ async fn delete_contact(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    if !existing.is_trashed {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     let active: contact::ActiveModel = existing.into();
     active
         .delete(&state.db)
@@ -298,6 +485,128 @@ async fn delete_contact(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn bulk_restore_contacts(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
+    Json(payload): Json<BulkContactActionRequest>,
+) -> Result<Json<Vec<ContactResponse>>, StatusCode> {
+    if payload.contact_ids.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    let mut restored = Vec::new();
+    for contact_id in payload.contact_ids {
+        if let Some(existing) = contact::Entity::find_by_id(contact_id)
+            .one(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            if existing.is_trashed {
+                let response = set_contact_trash_state(&state.db, existing, false).await?;
+                restored.push(response);
+            }
+        }
+    }
+
+    Ok(Json(restored))
+}
+
+async fn bulk_delete_contacts(
+    State(state): State<AppState>,
+    AdminUser(_admin): AdminUser,
+    Json(payload): Json<BulkContactActionRequest>,
+) -> Result<StatusCode, StatusCode> {
+    for contact_id in payload.contact_ids {
+        if let Some(existing) = contact::Entity::find_by_id(contact_id)
+            .one(&state.db)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            if existing.is_trashed {
+                let active: contact::ActiveModel = existing.into();
+                active
+                    .delete(&state.db)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            }
+        }
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn user_owns_contact(user: &user::Model, contact: &contact::Model) -> bool {
+    contact.owner_id.map(|id| id == user.id).unwrap_or(false)
+}
+
+fn can_edit_contact(user: &user::Model, contact: &contact::Model) -> bool {
+    user.is_admin() || user_owns_contact(user, contact)
+}
+
+fn can_trash_contact(user: &user::Model, contact: &contact::Model) -> bool {
+    user.is_admin() || user_owns_contact(user, contact)
+}
+
+async fn fetch_contacts(
+    db: &DatabaseConnection,
+    startup_id: Option<Uuid>,
+    trashed: bool,
+) -> Result<Vec<ContactResponse>, StatusCode> {
+    let mut query = contact::Entity::find().order_by_asc(contact::Column::Name);
+
+    if let Some(id) = startup_id {
+        query = query.filter(contact::Column::StartupId.eq(id));
+    }
+
+    if trashed {
+        query = query.filter(contact::Column::IsTrashed.eq(true));
+    } else {
+        query = query.filter(contact::Column::IsTrashed.eq(false));
+    }
+
+    let contacts = query
+        .find_also_related(user::Entity)
+        .all(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(contacts.into_iter().map(ContactResponse::from).collect())
+}
+
+async fn load_contact_with_owner(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<ContactResponse, StatusCode> {
+    let contact = contact::Entity::find_by_id(id)
+        .find_also_related(user::Entity)
+        .one(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(ContactResponse::from(contact))
+}
+
+async fn set_contact_trash_state(
+    db: &DatabaseConnection,
+    contact_model: contact::Model,
+    trashed: bool,
+) -> Result<ContactResponse, StatusCode> {
+    if contact_model.is_trashed == trashed {
+        return load_contact_with_owner(db, contact_model.id).await;
+    }
+
+    let mut active: contact::ActiveModel = contact_model.into();
+    active.is_trashed = Set(trashed);
+
+    let updated = active
+        .update(db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    load_contact_with_owner(db, updated.id).await
 }
 
 // OutreachLog handlers
@@ -328,6 +637,9 @@ async fn create_outreach_log(
         channel: Set(payload.channel),
         direction: Set(payload.direction),
         message_summary: Set(payload.message_summary),
+        message_id: Set(payload.message_id),
+        subject: Set(payload.subject),
+        delivery_status: Set(payload.delivery_status),
         date: Set(Utc::now().naive_utc()),
         outcome: Set(payload.outcome),
     };
@@ -338,6 +650,131 @@ async fn create_outreach_log(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(result))
+}
+
+async fn send_contact_email_handler(
+    State(state): State<AppState>,
+    AuthUser(sender): AuthUser,
+    Path((startup_id, contact_id)): Path<(Uuid, Uuid)>,
+    Json(payload): Json<SendContactEmailRequest>,
+) -> Result<Json<SendContactEmailResponse>, StatusCode> {
+    let contact = contact::Entity::find()
+        .filter(contact::Column::Id.eq(contact_id))
+        .filter(contact::Column::StartupId.eq(startup_id))
+        .filter(contact::Column::IsTrashed.eq(false))
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let startup = startup::Entity::find_by_id(startup_id)
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let template_kind = payload.template;
+    let defaults = template_kind.defaults(&contact.name, &startup.name);
+
+    let subject = payload.subject.unwrap_or_else(|| defaults.subject.clone());
+    let html_body = payload
+        .body_html
+        .unwrap_or_else(|| defaults.html_body.clone());
+    let mut text_body = payload
+        .body_text
+        .unwrap_or_else(|| defaults.text_body.clone());
+
+    if subject.trim().is_empty() || html_body.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if text_body.trim().is_empty() {
+        text_body = fallback_plain_text(&html_body);
+    }
+
+    let sender_email = sender.email.clone();
+    let sender_name = sender.name.clone().unwrap_or_else(|| sender_email.clone());
+
+    let send_result = state
+        .email_service
+        .send_contact_email(
+            contact.email.as_ref(),
+            &sender_name,
+            &sender_email,
+            &subject,
+            &html_body,
+            &text_body,
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("failed to send email: {}", err);
+            match err {
+                EmailServiceError::MissingRecipient => StatusCode::BAD_REQUEST,
+                EmailServiceError::Transport(_) => StatusCode::BAD_GATEWAY,
+            }
+        })?;
+
+    let summary = truncate_preview(&text_body);
+
+    let log = outreach_log::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        startup_id: Set(startup_id),
+        contact_id: Set(Some(contact_id)),
+        channel: Set("email".to_string()),
+        direction: Set("outbound".to_string()),
+        message_summary: Set(Some(summary)),
+        message_id: Set(Some(send_result.message_id.clone())),
+        subject: Set(Some(subject.clone())),
+        delivery_status: Set(Some(send_result.delivery_status.clone())),
+        date: Set(Utc::now().naive_utc()),
+        outcome: Set(format!("{} email sent", template_kind.display_name())),
+    };
+
+    let record = log
+        .insert(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(SendContactEmailResponse {
+        message_id: send_result.message_id,
+        delivery_status: send_result.delivery_status,
+        outreach_log: record,
+    }))
+}
+
+async fn get_email_status_handler(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+    Path(message_id): Path<String>,
+) -> Result<Json<EmailStatusResponse>, StatusCode> {
+    let log = outreach_log::Entity::find()
+        .filter(outreach_log::Column::MessageId.eq(message_id.clone()))
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let status = state
+        .email_service
+        .fetch_status(&message_id)
+        .await
+        .map_err(|err| {
+            tracing::error!("failed to fetch email status: {}", err);
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    let mut active: outreach_log::ActiveModel = log.into();
+    active.delivery_status = Set(Some(status.status.clone()));
+    let updated = active
+        .update(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(EmailStatusResponse {
+        message_id: updated.message_id.clone().unwrap_or(message_id),
+        delivery_status: status.status,
+        subject: updated.subject,
+    }))
 }
 
 // Interview handlers
@@ -503,6 +940,40 @@ async fn create_weekly_synthesis(
     Ok(Json(result))
 }
 
+fn truncate_preview(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() <= 240 {
+        return trimmed.to_string();
+    }
+
+    let mut shortened = String::new();
+    for ch in trimmed.chars().take(240) {
+        shortened.push(ch);
+    }
+    shortened.push_str("...");
+    shortened
+}
+
+fn fallback_plain_text(input: &str) -> String {
+    let mut output = String::new();
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                if !output.ends_with(' ') {
+                    output.push(' ');
+                }
+            }
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[tokio::main]
 async fn main() {
     // Load environment variables
@@ -518,7 +989,9 @@ async fn main() {
         .await
         .expect("Failed to connect to database");
 
-    let state = AppState { db };
+    let email_service = EmailService::from_env();
+
+    let state = AppState { db, email_service };
 
     // Build CORS layer
     // Note: Cannot use Any wildcards with allow_credentials(true)
@@ -586,11 +1059,32 @@ async fn main() {
             "/api/startups/:startup_id/contacts",
             get(list_contacts_for_startup).post(create_contact),
         )
-        .route("/api/contacts/:id", delete(delete_contact))
+        .route(
+            "/api/contacts/:id",
+            put(update_contact).delete(trash_contact),
+        )
+        .route("/api/admin/contacts/:id/restore", post(restore_contact))
+        .route(
+            "/api/admin/contacts/:id/permanent",
+            delete(permanently_delete_contact),
+        )
+        .route("/api/admin/contacts/restore", post(bulk_restore_contacts))
+        .route(
+            "/api/admin/contacts/delete-forever",
+            post(bulk_delete_contacts),
+        )
+        .route(
+            "/api/startups/:startup_id/contacts/:contact_id/send-email",
+            post(send_contact_email_handler),
+        )
         // OutreachLog routes
         .route(
             "/api/startups/:startup_id/outreach",
             get(list_outreach_for_startup).post(create_outreach_log),
+        )
+        .route(
+            "/api/email-status/:message_id",
+            get(get_email_status_handler),
         )
         // Interview routes
         .route(

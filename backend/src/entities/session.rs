@@ -38,6 +38,7 @@ impl Model {
         self.expires_at < chrono::Utc::now().naive_utc()
     }
 
+    #[allow(dead_code)]
     pub fn is_valid(&self) -> bool {
         !self.is_expired()
     }

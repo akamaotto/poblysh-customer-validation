@@ -45,6 +45,7 @@ impl Model {
         self.role == "admin"
     }
 
+    #[allow(dead_code)]
     pub fn is_user(&self) -> bool {
         self.role == "user"
     }

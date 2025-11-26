@@ -11,6 +11,7 @@ struct ResendEmailRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResendEmailResponse {
     id: String,
 }

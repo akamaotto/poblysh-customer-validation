@@ -67,6 +67,14 @@ validation/
    ```
    Frontend runs on `http://localhost:3000`
 
+### Email Integration Setup (Resend)
+
+1. Create a [Resend](https://resend.com) account and generate an API key with email send permissions.
+2. Add `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, and `RESEND_FROM_NAME` to `backend/.env`. The `RESEND_FROM_EMAIL` address must be verified in your Resend dashboard.
+3. During runtime each sent email is addressed `From` the currently logged-in Poblysh user (name + email), with the `RESEND_FROM_*` values acting only as fallbacks. Make sure every teammate signs in with their `@poblysh.com` account.
+4. Restart the backend after updating environment variables so the new credentials are loaded.
+5. Optional: set `FRONTEND_URL` in `backend/.env` if you want password reset and outreach emails to link to a non-localhost frontend.
+
 ## API Endpoints
 
 ### Startups
@@ -77,13 +85,23 @@ validation/
 - `DELETE /api/startups/:id` - Delete startup
 
 ### Contacts
-- `GET /api/startups/:startup_id/contacts` - List contacts for a startup
+- `GET /api/contacts[?trashed=true]` - List all contacts (admins can request trashed contacts)
+- `GET /api/startups/:startup_id/contacts[?trashed=true]` - List contacts for a startup (admins can include trashed)
 - `POST /api/startups/:startup_id/contacts` - Create new contact
-- `DELETE /api/contacts/:id` - Delete contact
+- `PUT /api/contacts/:id` - Update contact details
+- `DELETE /api/contacts/:id` - Move a contact to trash (owner or admin)
+- `POST /api/admin/contacts/:id/restore` - Restore a trashed contact (admin)
+- `DELETE /api/admin/contacts/:id/permanent` - Permanently delete a trashed contact (admin)
+- `POST /api/admin/contacts/restore` - Bulk restore trashed contacts
+- `POST /api/admin/contacts/delete-forever` - Bulk delete trashed contacts
 
 ### Outreach Logs
 - `GET /api/startups/:startup_id/outreach` - List outreach logs for a startup
 - `POST /api/startups/:startup_id/outreach` - Create new outreach log
+
+### Email Outreach
+- `POST /api/startups/:startup_id/contacts/:contact_id/send-email` - Send an email via Resend and log it automatically
+- `GET /api/email-status/:message_id` - Refresh delivery status for a previously sent email
 
 ### Health Check
 - `GET /health` - API health check
@@ -119,6 +137,12 @@ The app tracks startups through these validation stages:
 - **Weekly Synthesis**: Automated aggregation of validation insights
 - **Real-time Updates**: TanStack Query for optimistic UI updates
 
+### Contact Detail Sheet & Trash Workflow
+- Every contact row now includes a **View** action that opens a left-aligned sheet showing all stored fields with owner metadata, keeping the startup view visible in the background.
+- The sheet pins **Trash**, **Edit**, and **Email** buttons to the footer. Email reuses the existing compose modal, Edit reuses the contact form, and Trash is limited to the contact owner or admins.
+- Trashing a contact flips a soft-delete `is_trashed` flag, hides it from default lists, and surfaces a confirmation notice inside the sheet.
+- Admins can switch the startup contacts section into a **Trashed** tab to review, restore, or permanently delete contacts individually or in bulk via dedicated admin endpoints.
+
 ## Database Schema
 
 ### Core Entities
@@ -142,6 +166,9 @@ The app tracks startups through these validation stages:
 ```
 DATABASE_URL=postgresql://validation:validation@localhost:5432/validation
 RUST_LOG=info
+RESEND_API_KEY=your_resend_api_key
+RESEND_FROM_EMAIL=noreply@yourdomain.com
+RESEND_FROM_NAME=Poblysh
 ```
 
 ### Frontend (.env.local)

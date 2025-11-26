@@ -11,6 +11,9 @@ pub struct Model {
     pub channel: String,
     pub direction: String,
     pub message_summary: Option<String>,
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    pub delivery_status: Option<String>,
     pub date: DateTime,
     pub outcome: String,
 }

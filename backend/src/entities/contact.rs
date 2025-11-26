@@ -14,6 +14,8 @@ pub struct Model {
     pub linkedin_url: Option<String>,
     pub is_primary: bool,
     pub notes: Option<String>,
+    pub is_trashed: bool,
+    pub owner_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -24,11 +26,24 @@ pub enum Relation {
         to = "super::startup::Column::Id"
     )]
     Startup,
+    #[sea_orm(
+        belongs_to = "super::user::Entity",
+        from = "Column::OwnerId",
+        to = "super::user::Column::Id",
+        on_delete = "SetNull"
+    )]
+    Owner,
 }
 
 impl Related<super::startup::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Startup.def()
+    }
+}
+
+impl Related<super::user::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Owner.def()
     }
 }
 

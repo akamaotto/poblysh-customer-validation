@@ -32,6 +32,10 @@ export interface Contact {
   linkedin_url: string | null;
   is_primary: boolean;
   notes: string | null;
+  is_trashed: boolean;
+  owner_id: string | null;
+  owner_name: string | null;
+  owner_email: string | null;
 }
 
 export interface CreateContactRequest {
@@ -45,6 +49,20 @@ export interface CreateContactRequest {
   notes?: string;
 }
 
+export interface UpdateContactRequest {
+  name?: string;
+  role?: string;
+  email?: string;
+  phone?: string;
+  linkedin_url?: string;
+  is_primary?: boolean;
+  notes?: string;
+}
+
+interface ContactListParams {
+  trashed?: boolean;
+}
+
 export interface OutreachLog {
   id: string;
   startup_id: string;
@@ -52,6 +70,9 @@ export interface OutreachLog {
   channel: string;
   direction: string;
   message_summary: string | null;
+  message_id: string | null;
+  subject: string | null;
+  delivery_status: string | null;
   date: string;
   outcome: string;
 }
@@ -62,7 +83,31 @@ export interface CreateOutreachLogRequest {
   channel: string;
   direction: string;
   message_summary?: string;
+  message_id?: string;
+  subject?: string;
+  delivery_status?: string;
   outcome: string;
+}
+
+export type EmailTemplateKey = 'intro' | 'follow-up' | 'custom';
+
+export interface SendContactEmailRequest {
+  subject?: string;
+  body_html?: string;
+  body_text?: string;
+  template?: EmailTemplateKey;
+}
+
+export interface SendContactEmailResponse {
+  message_id: string;
+  delivery_status: string;
+  outreach_log: OutreachLog;
+}
+
+export interface EmailStatusResponse {
+  message_id: string;
+  delivery_status: string;
+  subject: string | null;
 }
 
 export const api = {
@@ -114,16 +159,18 @@ export const api = {
   },
 
   // Contact methods
-  async getContacts(): Promise<Contact[]> {
-    const res = await fetch(`${API_BASE_URL}/api/contacts`, {
+  async getContacts(params?: ContactListParams): Promise<Contact[]> {
+    const query = params?.trashed ? `?trashed=${params.trashed}` : '';
+    const res = await fetch(`${API_BASE_URL}/api/contacts${query}`, {
       credentials: 'include',
     });
     if (!res.ok) throw new Error('Failed to fetch contacts');
     return res.json();
   },
 
-  async getContactsForStartup(startupId: string): Promise<Contact[]> {
-    const res = await fetch(`${API_BASE_URL}/api/startups/${startupId}/contacts`, {
+  async getContactsForStartup(startupId: string, params?: ContactListParams): Promise<Contact[]> {
+    const query = params?.trashed ? `?trashed=${params.trashed}` : '';
+    const res = await fetch(`${API_BASE_URL}/api/startups/${startupId}/contacts${query}`, {
       credentials: 'include',
     });
     if (!res.ok) throw new Error('Failed to fetch contacts');
@@ -141,12 +188,62 @@ export const api = {
     return res.json();
   },
 
-  async deleteContact(id: string): Promise<void> {
+  async updateContact(id: string, data: UpdateContactRequest): Promise<Contact> {
+    const res = await fetch(`${API_BASE_URL}/api/contacts/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error('Failed to update contact');
+    return res.json();
+  },
+
+  async trashContact(id: string): Promise<Contact> {
     const res = await fetch(`${API_BASE_URL}/api/contacts/${id}`, {
       method: 'DELETE',
       credentials: 'include',
     });
-    if (!res.ok) throw new Error('Failed to delete contact');
+    if (!res.ok) throw new Error('Failed to move contact to trash');
+    return res.json();
+  },
+
+  async restoreContact(id: string): Promise<Contact> {
+    const res = await fetch(`${API_BASE_URL}/api/admin/contacts/${id}/restore`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error('Failed to restore contact');
+    return res.json();
+  },
+
+  async permanentlyDeleteContact(id: string): Promise<void> {
+    const res = await fetch(`${API_BASE_URL}/api/admin/contacts/${id}/permanent`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error('Failed to permanently delete contact');
+  },
+
+  async bulkRestoreContacts(contactIds: string[]): Promise<Contact[]> {
+    const res = await fetch(`${API_BASE_URL}/api/admin/contacts/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ contact_ids: contactIds }),
+    });
+    if (!res.ok) throw new Error('Failed to restore contacts');
+    return res.json();
+  },
+
+  async bulkDeleteContacts(contactIds: string[]): Promise<void> {
+    const res = await fetch(`${API_BASE_URL}/api/admin/contacts/delete-forever`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ contact_ids: contactIds }),
+    });
+    if (!res.ok) throw new Error('Failed to delete contacts');
   },
 
   // OutreachLog methods
@@ -166,6 +263,25 @@ export const api = {
       body: JSON.stringify(data),
     });
     if (!res.ok) throw new Error('Failed to create outreach log');
+    return res.json();
+  },
+
+  async sendContactEmail(startupId: string, contactId: string, data: SendContactEmailRequest): Promise<SendContactEmailResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/startups/${startupId}/contacts/${contactId}/send-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error('Failed to send email');
+    return res.json();
+  },
+
+  async getEmailStatus(messageId: string): Promise<EmailStatusResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/email-status/${messageId}`, {
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error('Failed to refresh email status');
     return res.json();
   },
 

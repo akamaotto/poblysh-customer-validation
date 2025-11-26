@@ -1,12 +1,14 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useContacts, useCreateContact } from '@/lib/hooks';
+import { useContacts, useCreateContact, useUpdateContact } from '@/lib/hooks';
+import type { Contact } from '@/lib/api';
 
 interface ContactFormProps {
     startupId: string;
     onClose: () => void;
     onSuccess: () => void;
+    contact?: Contact | null;
 }
 
 const ROLES = [
@@ -20,20 +22,44 @@ const ROLES = [
     'Other',
 ];
 
-export function ContactForm({ startupId, onClose, onSuccess }: ContactFormProps) {
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const createBlankForm = () => ({
+    name: '',
+    role: 'Founder',
+    email: '',
+    phone: '',
+    linkedin_url: '',
+    is_primary: false,
+    notes: '',
+});
+
+export function ContactForm({ startupId, onClose, onSuccess, contact }: ContactFormProps) {
     const createContact = useCreateContact();
+    const updateContact = useUpdateContact();
     const { data: contacts } = useContacts();
-    const [formData, setFormData] = useState({
-        name: '',
-        role: 'Founder',
-        email: '',
-        phone: '',
-        linkedin_url: '',
-        is_primary: false,
-        notes: '',
-    });
+    const initialValues = useMemo(
+        () =>
+            contact
+                ? {
+                      name: contact.name,
+                      role: contact.role,
+                      email: contact.email || '',
+                      phone: contact.phone || '',
+                      linkedin_url: contact.linkedin_url || '',
+                      is_primary: contact.is_primary || false,
+                      notes: contact.notes || '',
+                  }
+                : createBlankForm(),
+        [contact],
+    );
+    const [formData, setFormData] = useState(initialValues);
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
+    const [emailError, setEmailError] = useState<string | null>(null);
+    const isEdit = Boolean(contact);
+    const isSubmitting = isEdit ? updateContact.isPending : createContact.isPending;
+    const hasError = isEdit ? updateContact.isError : createContact.isError;
 
     const filteredContacts = useMemo(() => {
         if (!contacts || searchTerm.trim() === '') return contacts || [];
@@ -60,35 +86,64 @@ export function ContactForm({ startupId, onClose, onSuccess }: ContactFormProps)
         });
     };
 
+    const handleEmailChange = (value: string) => {
+        setFormData({ ...formData, email: value });
+        if (value && !EMAIL_REGEX.test(value)) {
+            setEmailError('Please enter a valid email address.');
+        } else {
+            setEmailError(null);
+        }
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
+        if (formData.email && !EMAIL_REGEX.test(formData.email)) {
+            setEmailError('Please enter a valid email address.');
+            return;
+        }
+
         try {
-            await createContact.mutateAsync({
-                startup_id: startupId,
-                name: formData.name,
-                role: formData.role,
-                email: formData.email || undefined,
-                phone: formData.phone || undefined,
-                linkedin_url: formData.linkedin_url || undefined,
-                is_primary: formData.is_primary,
-                notes: formData.notes || undefined,
-            });
+            if (isEdit && contact) {
+                await updateContact.mutateAsync({
+                    id: contact.id,
+                    data: {
+                        name: formData.name,
+                        role: formData.role,
+                        email: formData.email || undefined,
+                        phone: formData.phone || undefined,
+                        linkedin_url: formData.linkedin_url || undefined,
+                        is_primary: formData.is_primary,
+                        notes: formData.notes || undefined,
+                    },
+                });
+            } else {
+                await createContact.mutateAsync({
+                    startup_id: startupId,
+                    name: formData.name,
+                    role: formData.role,
+                    email: formData.email || undefined,
+                    phone: formData.phone || undefined,
+                    linkedin_url: formData.linkedin_url || undefined,
+                    is_primary: formData.is_primary,
+                    notes: formData.notes || undefined,
+                });
+            }
 
             onSuccess();
             onClose();
         } catch (error) {
-            console.error('Failed to create contact:', error);
+            console.error('Failed to save contact:', error);
         }
     };
 
     return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in duration-200">
             <div className="bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 shadow-2xl animate-in zoom-in-95 duration-200">
-                <h2 className="text-2xl font-bold text-foreground mb-4">Add Contact</h2>
+                <h2 className="text-2xl font-bold text-foreground mb-4">{isEdit ? 'Edit Contact' : 'Add Contact'}</h2>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
-                    {contacts && contacts.length > 0 && (
+                    {!isEdit && contacts && contacts.length > 0 && (
                         <div className="border border-border rounded-lg p-4 bg-muted/30">
                             <div className="flex items-center justify-between mb-3">
                                 <div>
@@ -189,10 +244,12 @@ export function ContactForm({ startupId, onClose, onSuccess }: ContactFormProps)
                             type="email"
                             id="email"
                             value={formData.email}
-                            onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                            onChange={(e) => handleEmailChange(e.target.value)}
+                            aria-invalid={emailError ? 'true' : 'false'}
                             className="w-full px-3 py-2 bg-background border border-input rounded-md text-foreground focus:outline-none focus:ring-2 focus:ring-ring transition-all"
                             placeholder="john@example.com"
                         />
+                        {emailError && <p className="text-xs text-destructive mt-1">{emailError}</p>}
                     </div>
 
                     {/* Phone */}
@@ -258,10 +315,10 @@ export function ContactForm({ startupId, onClose, onSuccess }: ContactFormProps)
                     <div className="flex gap-3 pt-2">
                         <button
                             type="submit"
-                            disabled={createContact.isPending}
+                            disabled={isSubmitting}
                             className="flex-1 px-4 py-2 bg-primary text-white rounded-lg hover:opacity-90 active:scale-95 transition-all disabled:opacity-50 font-medium shadow-md hover:shadow-lg"
                         >
-                            {createContact.isPending ? 'Adding...' : 'Add Contact'}
+                            {isSubmitting ? (isEdit ? 'Saving...' : 'Adding...') : isEdit ? 'Save Changes' : 'Add Contact'}
                         </button>
                         <button
                             type="button"
@@ -272,9 +329,9 @@ export function ContactForm({ startupId, onClose, onSuccess }: ContactFormProps)
                         </button>
                     </div>
 
-                    {createContact.isError && (
+                    {hasError && (
                         <p className="text-destructive text-sm text-center">
-                            Failed to add contact. Please try again.
+                            Failed to save contact. Please try again.
                         </p>
                     )}
                 </form>

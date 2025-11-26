@@ -74,7 +74,10 @@ pub async fn login(
     Json(payload): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<LoginResponse>), StatusCode> {
     info!(email = %payload.email, "Login attempt started");
-    info!(password_length = payload.password.len(), "Password provided");
+    info!(
+        password_length = payload.password.len(),
+        "Password provided"
+    );
 
     // Find user by email
     let mut user_model = user::Entity::find()
@@ -93,17 +96,21 @@ pub async fn login(
         && payload.password == DEFAULT_ADMIN_PASSWORD
     {
         info!("Creating default admin user");
-        user_model = Some(
-            ensure_default_admin(&db)
-                .await
-                .map_err(|e| {
-                    error!(error = %e, "Failed to create default admin user");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?,
+        user_model = Some(ensure_default_admin(&db).await.map_err(|e| {
+            error!(error = %e, "Failed to create default admin user");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?);
+        info!(
+            user_created = user_model.is_some(),
+            "Default admin user creation completed"
         );
-        info!(user_created = user_model.is_some(), "Default admin user creation completed");
     } else if user_model.is_none() {
-        info!(expected_email = DEFAULT_ADMIN_EMAIL, email_matches = payload.email.eq_ignore_ascii_case(DEFAULT_ADMIN_EMAIL), password_matches = payload.password == DEFAULT_ADMIN_PASSWORD, "Default admin credentials check failed");
+        info!(
+            expected_email = DEFAULT_ADMIN_EMAIL,
+            email_matches = payload.email.eq_ignore_ascii_case(DEFAULT_ADMIN_EMAIL),
+            password_matches = payload.password == DEFAULT_ADMIN_PASSWORD,
+            "Default admin credentials check failed"
+        );
     }
 
     let user_model = match user_model {

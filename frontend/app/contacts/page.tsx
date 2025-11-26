@@ -1,13 +1,28 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { useContacts } from '@/lib/hooks';
+import { useContacts, useTrashContact, useStartups } from '@/lib/hooks';
 import { AddContactSheet } from '@/components/AddContactSheet';
+import { ContactDetailSheet } from '@/components/ContactDetailSheet';
+import { ContactForm } from '@/components/ContactForm';
+import { EmailCompose } from '@/components/EmailCompose';
+import type { Contact } from '@/lib/api';
+import { useAuth } from '@/lib/auth-context';
+import { Eye } from 'lucide-react';
 
 export default function ContactsPage() {
-    const { data: contacts, isLoading, error } = useContacts();
+    const { data: contacts, isLoading, error, refetch } = useContacts();
+    const { data: startups } = useStartups();
     const [searchTerm, setSearchTerm] = useState('');
     const [isAddContactOpen, setIsAddContactOpen] = useState(false);
+    const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+    const [isContactSheetOpen, setIsContactSheetOpen] = useState(false);
+    const [contactFeedback, setContactFeedback] = useState<string | null>(null);
+    const [contactFormContact, setContactFormContact] = useState<Contact | null>(null);
+    const [isContactFormOpen, setIsContactFormOpen] = useState(false);
+    const [contactForEmail, setContactForEmail] = useState<Contact | null>(null);
+    const trashContactMutation = useTrashContact();
+    const { user } = useAuth();
 
     // Filter contacts
     const filteredContacts = useMemo(() => {
@@ -20,6 +35,46 @@ export default function ContactsPage() {
             contact.email?.toLowerCase().includes(searchTerm.toLowerCase())
         );
     }, [contacts, searchTerm]);
+    const startupLookup = useMemo(() => {
+        if (!startups) return {} as Record<string, string>;
+        return startups.reduce<Record<string, string>>((acc, startup) => {
+            acc[startup.id] = startup.name;
+            return acc;
+        }, {});
+    }, [startups]);
+
+    const handleViewContact = (contact: Contact) => {
+        setSelectedContact(contact);
+        setContactFeedback(null);
+        setIsContactSheetOpen(true);
+    };
+
+    const closeContactSheet = () => {
+        setIsContactSheetOpen(false);
+        setSelectedContact(null);
+        setContactFeedback(null);
+    };
+
+    const handleTrashContact = async (contact: Contact) => {
+        try {
+            await trashContactMutation.mutateAsync({ id: contact.id, startupId: contact.startup_id });
+            setContactFeedback('Contact moved to trash.');
+            await refetch();
+        } catch (err) {
+            console.error('Failed to trash contact', err);
+        }
+    };
+
+    const canTrashSelected =
+        !!selectedContact &&
+        (user?.role === 'admin' ||
+            (!!selectedContact.owner_id && !!user && selectedContact.owner_id === user.id));
+
+    const handleEditContact = (contact: Contact) => {
+        setContactFormContact(contact);
+        setIsContactFormOpen(true);
+        closeContactSheet();
+    };
 
     if (isLoading) {
         return (
@@ -106,6 +161,9 @@ export default function ContactsPage() {
                                     <th className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">
                                         Primary
                                     </th>
+                                    <th className="px-6 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                        Actions
+                                    </th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border">
@@ -142,6 +200,15 @@ export default function ContactsPage() {
                                                 </span>
                                             )}
                                         </td>
+                                        <td className="px-6 py-4 whitespace-nowrap text-right">
+                                            <button
+                                                onClick={() => handleViewContact(contact)}
+                                                className="inline-flex items-center gap-1 text-sm text-muted-foreground border border-border rounded-md px-3 py-1 hover:text-foreground"
+                                            >
+                                                <Eye className="h-3.5 w-3.5" />
+                                                View
+                                            </button>
+                                        </td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -150,10 +217,55 @@ export default function ContactsPage() {
                 </div>
             </div>
 
-            <AddContactSheet
-                isOpen={isAddContactOpen}
-                onClose={() => setIsAddContactOpen(false)}
+            <ContactDetailSheet
+                contact={selectedContact}
+                isOpen={isContactSheetOpen && !!selectedContact}
+                onClose={closeContactSheet}
+                onEdit={handleEditContact}
+                onEmail={(contact) => {
+                    setContactForEmail(contact);
+                    closeContactSheet();
+                }}
+                onTrash={handleTrashContact}
+                isTrashLoading={
+                    trashContactMutation.isPending &&
+                    trashContactMutation.variables?.id === selectedContact?.id
+                }
+                canTrash={canTrashSelected}
+                trashDisabledReason="Only owners or admins can move contacts to trash."
+                feedbackMessage={contactFeedback}
             />
+
+            {isContactFormOpen && contactFormContact && (
+                <ContactForm
+                    key={contactFormContact.id}
+                    startupId={contactFormContact.startup_id}
+                    contact={contactFormContact}
+                    onClose={() => {
+                        setIsContactFormOpen(false);
+                        setContactFormContact(null);
+                    }}
+                    onSuccess={() => {
+                        refetch();
+                        setIsContactFormOpen(false);
+                        setContactFormContact(null);
+                    }}
+                />
+            )}
+
+            {contactForEmail && (
+                <EmailCompose
+                    startupId={contactForEmail.startup_id}
+                    startupName={startupLookup[contactForEmail.startup_id] || 'Startup Contact'}
+                    contact={contactForEmail}
+                    onClose={() => setContactForEmail(null)}
+                    onSent={() => {
+                        setContactForEmail(null);
+                    }}
+                />
+            )}
+
+            <AddContactSheet isOpen={isAddContactOpen} onClose={() => setIsAddContactOpen(false)} />
         </div>
     );
 }

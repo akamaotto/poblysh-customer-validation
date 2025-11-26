@@ -8,10 +8,13 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace"] }
-sea-orm = { version = "1.1.19", features = [
+sea-orm = { version = "2.0.0-rc.19", default-features = false, features = [
     "sqlx-postgres",
     "runtime-tokio-native-tls",
     "macros",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -28,3 +31,4 @@ reqwest = { version = "0.11", features = ["json"] }
 axum-extra = { version = "0.9", features = ["cookie"] }
 hex = "0.4"
 time = "0.3"
+resend-rs = "0.19.0"

@@ -1,3 +1,4 @@
+use chrono::NaiveDate;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -6,8 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
-    pub week_start_date: Date,
-    pub week_end_date: Date,
+    pub week_start_date: NaiveDate,
+    pub week_end_date: NaiveDate,
     pub top_pains: Option<String>,
     pub top_desired_outcomes: Option<String>,
     pub top_features: Option<String>,

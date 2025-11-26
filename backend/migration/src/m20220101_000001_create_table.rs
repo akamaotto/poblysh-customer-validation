@@ -64,6 +64,9 @@ impl MigrationTrait for Migration {
                     .col(string(OutreachLog::Channel))
                     .col(string(OutreachLog::Direction))
                     .col(text_null(OutreachLog::MessageSummary))
+                    .col(string_null(OutreachLog::MessageId))
+                    .col(string_null(OutreachLog::Subject))
+                    .col(string_null(OutreachLog::DeliveryStatus))
                     .col(timestamp(OutreachLog::Date))
                     .col(string(OutreachLog::Outcome))
                     .foreign_key(
@@ -229,6 +232,9 @@ enum OutreachLog {
     Channel,
     Direction,
     MessageSummary,
+    MessageId,
+    Subject,
+    DeliveryStatus,
     Date,
     Outcome,
 }

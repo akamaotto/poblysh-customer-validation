@@ -1,7 +1,15 @@
 'use client';
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, type CreateStartupRequest, type CreateContactRequest, type CreateOutreachLogRequest, type CreateInterviewRequest, type CreateInterviewInsightRequest } from '@/lib/api';
+import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { api, type CreateStartupRequest, type CreateContactRequest, type CreateOutreachLogRequest, type CreateInterviewRequest, type CreateInterviewInsightRequest, type SendContactEmailRequest, type UpdateContactRequest } from '@/lib/api';
+
+function invalidateContactQueries(queryClient: QueryClient, startupId?: string) {
+  queryClient.invalidateQueries({ queryKey: ['contacts'] });
+  if (startupId) {
+    queryClient.invalidateQueries({ queryKey: ['contacts', startupId, 'active'] });
+    queryClient.invalidateQueries({ queryKey: ['contacts', startupId, 'trashed'] });
+  }
+}
 
 // Startup hooks
 export function useStartups() {
@@ -61,11 +69,14 @@ export function useContacts() {
   });
 }
 
-export function useContactsForStartup(startupId: string) {
+export function useContactsForStartup(startupId: string, options?: { trashed?: boolean; enabled?: boolean }) {
+  const trashed = options?.trashed ?? false;
+  const enabled = options?.enabled ?? true;
+
   return useQuery({
-    queryKey: ['contacts', startupId],
-    queryFn: () => api.getContactsForStartup(startupId),
-    enabled: !!startupId,
+    queryKey: ['contacts', startupId, trashed ? 'trashed' : 'active'],
+    queryFn: () => api.getContactsForStartup(startupId, { trashed }),
+    enabled: !!startupId && enabled,
   });
 }
 
@@ -75,19 +86,75 @@ export function useCreateContact() {
   return useMutation({
     mutationFn: (data: CreateContactRequest) => api.createContact(data),
     onSuccess: (_, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['contacts'] });
-      queryClient.invalidateQueries({ queryKey: ['contacts', variables.startup_id] });
+      invalidateContactQueries(queryClient, variables.startup_id);
     },
   });
 }
 
-export function useDeleteContact() {
+export function useUpdateContact() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateContactRequest }) => api.updateContact(id, data),
+    onSuccess: (contact) => {
+      invalidateContactQueries(queryClient, contact.startup_id);
+    },
+  });
+}
+
+export function useTrashContact() {
   const queryClient = useQueryClient();
   
   return useMutation({
-    mutationFn: (id: string) => api.deleteContact(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['contacts'] });
+    mutationFn: ({ id }: { id: string; startupId: string }) => api.trashContact(id),
+    onSuccess: (contact, variables) => {
+      invalidateContactQueries(queryClient, variables.startupId);
+    },
+  });
+}
+
+export function useRestoreContact() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id }: { id: string; startupId: string }) => api.restoreContact(id),
+    onSuccess: (_, variables) => {
+      invalidateContactQueries(queryClient, variables.startupId);
+    },
+  });
+}
+
+export function usePermanentDeleteContact() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id }: { id: string; startupId: string }) => api.permanentlyDeleteContact(id),
+    onSuccess: (_, variables) => {
+      invalidateContactQueries(queryClient, variables.startupId);
+    },
+  });
+}
+
+export function useBulkRestoreContacts() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ contactIds }: { contactIds: string[]; startupId: string }) =>
+      api.bulkRestoreContacts(contactIds),
+    onSuccess: (_, variables) => {
+      invalidateContactQueries(queryClient, variables.startupId);
+    },
+  });
+}
+
+export function useBulkDeleteContacts() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ contactIds }: { contactIds: string[]; startupId: string }) =>
+      api.bulkDeleteContacts(contactIds),
+    onSuccess: (_, variables) => {
+      invalidateContactQueries(queryClient, variables.startupId);
     },
   });
 }
@@ -108,6 +175,29 @@ export function useCreateOutreachLog() {
     mutationFn: (data: CreateOutreachLogRequest) => api.createOutreachLog(data),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['outreach', variables.startup_id] });
+    },
+  });
+}
+
+export function useSendContactEmail() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ startupId, contactId, data }: { startupId: string; contactId: string; data: SendContactEmailRequest }) =>
+      api.sendContactEmail(startupId, contactId, data),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['outreach', variables.startupId] });
+    },
+  });
+}
+
+export function useRefreshEmailStatus() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ messageId }: { messageId: string; startupId: string }) => api.getEmailStatus(messageId),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['outreach', variables.startupId] });
     },
   });
 }
