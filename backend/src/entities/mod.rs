@@ -1,9 +1,17 @@
+pub mod activity_event;
 pub mod contact;
+pub mod conversation;
+pub mod email_attachment;
+pub mod email_credential;
+pub mod email_provider_setting;
 pub mod interview;
 pub mod interview_insight;
+pub mod message;
 pub mod outreach_log;
 pub mod password_reset_token;
 pub mod session;
 pub mod startup;
 pub mod user;
+pub mod weekly_activity_plan;
+pub mod weekly_metric_definition;
 pub mod weekly_synthesis;

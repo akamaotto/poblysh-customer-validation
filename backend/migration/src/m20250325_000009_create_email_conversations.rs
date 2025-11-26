@@ -1,0 +1,608 @@
+use sea_orm_migration::prelude::*;
+use crate::m20220101_000001_create_table::Startup as StartupTable;
+
+#[derive(DeriveMigrationName)]
+pub struct Migration;
+
+#[async_trait::async_trait]
+impl MigrationTrait for Migration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Admin-configured provider defaults
+        manager
+            .create_table(
+                Table::create()
+                    .table(EmailProviderSettings::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::Domain)
+                            .string()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::ImapHost)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::ImapPort)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::ImapSecurity)
+                            .string()
+                            .not_null()
+                            .default("ssl"),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::SmtpHost)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::SmtpPort)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::SmtpSecurity)
+                            .string()
+                            .not_null()
+                            .default("tls"),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::Provider)
+                            .string()
+                            .not_null()
+                            .default("custom"),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::RequireAppPassword)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailProviderSettings::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Per-user credential storage
+        manager
+            .create_table(
+                Table::create()
+                    .table(EmailCredentials::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(EmailCredentials::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(EmailCredentials::UserId).uuid().not_null())
+                    .col(ColumnDef::new(EmailCredentials::Email).string().not_null())
+                    .col(
+                        ColumnDef::new(EmailCredentials::ImapHost)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::ImapPort)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::SmtpHost)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::SmtpPort)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(EmailCredentials::EncryptedPassword).string().not_null())
+                    .col(ColumnDef::new(EmailCredentials::Nonce).string().not_null())
+                    .col(
+                        ColumnDef::new(EmailCredentials::ProviderSettingsId)
+                            .uuid()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::SyncStatus)
+                            .string()
+                            .not_null()
+                            .default("disconnected"),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::SyncEnabled)
+                            .boolean()
+                            .not_null()
+                            .default(true),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::LastSyncedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::LastSyncAttemptAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::LastSyncError)
+                            .text()
+                            .null(),
+                    )
+                    .col(ColumnDef::new(EmailCredentials::SyncCursor).integer().null())
+                    .col(
+                        ColumnDef::new(EmailCredentials::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailCredentials::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-email_credentials-user_id")
+                            .from(EmailCredentials::Table, EmailCredentials::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-email_credentials-provider")
+                            .from(
+                                EmailCredentials::Table,
+                                EmailCredentials::ProviderSettingsId,
+                            )
+                            .to(
+                                EmailProviderSettings::Table,
+                                EmailProviderSettings::Id,
+                            )
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Conversations aggregate
+        manager
+            .create_table(
+                Table::create()
+                    .table(Conversations::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Conversations::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Conversations::UserId).uuid().not_null())
+                    .col(ColumnDef::new(Conversations::Subject).string().not_null())
+                    .col(ColumnDef::new(Conversations::Snippet).string())
+                    .col(ColumnDef::new(Conversations::ThreadId).string())
+                    .col(ColumnDef::new(Conversations::StartupId).uuid().null())
+                    .col(
+                        ColumnDef::new(Conversations::LatestMessageAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::HasAttachments)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::IsRead)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::IsArchived)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::MessageCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::UnreadCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::Participants)
+                            .json()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Conversations::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-conversations-user_id")
+                            .from(Conversations::Table, Conversations::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-conversations-startup_id")
+                            .from(Conversations::Table, Conversations::StartupId)
+                            .to(StartupTable::Table, StartupTable::Id)
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Individual messages
+        manager
+            .create_table(
+                Table::create()
+                    .table(Messages::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Messages::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Messages::ConversationId).uuid().not_null())
+                    .col(ColumnDef::new(Messages::UserId).uuid().not_null())
+                    .col(ColumnDef::new(Messages::SenderName).string())
+                    .col(ColumnDef::new(Messages::SenderEmail).string().not_null())
+                    .col(ColumnDef::new(Messages::Subject).string().not_null())
+                    .col(ColumnDef::new(Messages::BodyText).text())
+                    .col(ColumnDef::new(Messages::BodyHtml).text())
+                    .col(
+                        ColumnDef::new(Messages::Direction)
+                            .string()
+                            .not_null()
+                            .default("received"),
+                    )
+                    .col(ColumnDef::new(Messages::ToEmails).json().not_null())
+                    .col(ColumnDef::new(Messages::CcEmails).json().not_null())
+                    .col(ColumnDef::new(Messages::BccEmails).json().not_null())
+                    .col(
+                        ColumnDef::new(Messages::SentAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::DeliveredAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::ReadAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::IsRead)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::IsFromMe)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(Messages::ImapUid).integer())
+                    .col(ColumnDef::new(Messages::MessageIdHeader).string())
+                    .col(ColumnDef::new(Messages::InReplyTo).string())
+                    .col(ColumnDef::new(Messages::References).text())
+                    .col(ColumnDef::new(Messages::Snippet).string())
+                    .col(
+                        ColumnDef::new(Messages::HasAttachments)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::AttachmentCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Messages::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-messages-conversation_id")
+                            .from(Messages::Table, Messages::ConversationId)
+                            .to(Conversations::Table, Conversations::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-messages-user_id")
+                            .from(Messages::Table, Messages::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Attachments metadata + blobs
+        manager
+            .create_table(
+                Table::create()
+                    .table(EmailMessageAttachments::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::MessageId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::FileName)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::ContentType)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::SizeBytes)
+                            .big_integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::IsInline)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(ColumnDef::new(EmailMessageAttachments::ContentId).string())
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::Data)
+                            .binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(EmailMessageAttachments::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk-email_attachments-message_id")
+                            .from(
+                                EmailMessageAttachments::Table,
+                                EmailMessageAttachments::MessageId,
+                            )
+                            .to(Messages::Table, Messages::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Helpful indexes
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-email_credentials-user")
+                    .table(EmailCredentials::Table)
+                    .col(EmailCredentials::UserId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-conversations-user_id")
+                    .table(Conversations::Table)
+                    .col(Conversations::UserId)
+                    .col(Conversations::IsArchived)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-conversations-startup_id")
+                    .table(Conversations::Table)
+                    .col(Conversations::StartupId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx-messages-conversation_id")
+                    .table(Messages::Table)
+                    .col(Messages::ConversationId)
+                    .col(Messages::SentAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(EmailMessageAttachments::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Messages::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Conversations::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(EmailCredentials::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(EmailProviderSettings::Table).to_owned())
+            .await?;
+
+        Ok(())
+    }
+}
+
+#[derive(Iden)]
+enum EmailProviderSettings {
+    Table,
+    Id,
+    Domain,
+    ImapHost,
+    ImapPort,
+    ImapSecurity,
+    SmtpHost,
+    SmtpPort,
+    SmtpSecurity,
+    Provider,
+    RequireAppPassword,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(Iden)]
+enum EmailCredentials {
+    Table,
+    Id,
+    UserId,
+    Email,
+    ImapHost,
+    ImapPort,
+    SmtpHost,
+    SmtpPort,
+    EncryptedPassword,
+    Nonce,
+    ProviderSettingsId,
+    SyncStatus,
+    SyncEnabled,
+    LastSyncedAt,
+    LastSyncAttemptAt,
+    LastSyncError,
+    SyncCursor,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(Iden)]
+enum Conversations {
+    Table,
+    Id,
+    UserId,
+    Subject,
+    Snippet,
+    ThreadId,
+    StartupId,
+    LatestMessageAt,
+    HasAttachments,
+    IsRead,
+    IsArchived,
+    MessageCount,
+    UnreadCount,
+    Participants,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(Iden)]
+enum Messages {
+    Table,
+    Id,
+    ConversationId,
+    UserId,
+    SenderName,
+    SenderEmail,
+    Subject,
+    BodyText,
+    BodyHtml,
+    Direction,
+    ToEmails,
+    CcEmails,
+    BccEmails,
+    SentAt,
+    DeliveredAt,
+    ReadAt,
+    IsRead,
+    IsFromMe,
+    ImapUid,
+    MessageIdHeader,
+    InReplyTo,
+    References,
+    Snippet,
+    HasAttachments,
+    AttachmentCount,
+    CreatedAt,
+}
+
+#[derive(Iden)]
+enum EmailMessageAttachments {
+    Table,
+    Id,
+    MessageId,
+    FileName,
+    ContentType,
+    SizeBytes,
+    IsInline,
+    ContentId,
+    Data,
+    CreatedAt,
+}
+
+#[derive(Iden)]
+pub enum Users {
+    Table,
+    Id,
+}

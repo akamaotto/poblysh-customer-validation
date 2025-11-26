@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type CreateStartupRequest, type CreateContactRequest, type CreateOutreachLogRequest, type CreateInterviewRequest, type CreateInterviewInsightRequest, type SendContactEmailRequest, type UpdateContactRequest } from '@/lib/api';
+import { activityApi, api, userApi, type ActivityFeedParams, type CreateContactRequest, type CreateInterviewInsightRequest, type CreateInterviewRequest, type CreateOutreachLogRequest, type CreateStartupRequest, type SendContactEmailRequest, type UpdateContactRequest, type WeeklyPlanInput } from '@/lib/api';
 
 function invalidateContactQueries(queryClient: QueryClient, startupId?: string) {
   queryClient.invalidateQueries({ queryKey: ['contacts'] });
@@ -199,6 +199,61 @@ export function useRefreshEmailStatus() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['outreach', variables.startupId] });
     },
+  });
+}
+
+export function useWeeklyActivitySummary() {
+  return useQuery({
+    queryKey: ['activity-summary'],
+    queryFn: activityApi.getSummary,
+    refetchInterval: 60 * 1000,
+  });
+}
+
+export function useActivityFeed(filters: ActivityFeedParams) {
+  return useQuery({
+    queryKey: ['activity-feed', filters],
+    queryFn: () => activityApi.getFeed(filters),
+    keepPreviousData: true,
+  });
+}
+
+export function useWeeklyActivityPlan(weekStart?: string) {
+  return useQuery({
+    queryKey: ['activity-plan', weekStart ?? 'current'],
+    queryFn: () => activityApi.getPlan(weekStart),
+  });
+}
+
+export function useUpdateWeeklyActivityPlan() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: WeeklyPlanInput) => activityApi.updatePlan(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['activity-plan'] });
+      queryClient.invalidateQueries({ queryKey: ['activity-summary'] });
+    },
+  });
+}
+
+export function useCloseWeeklyActivityPlan() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (planId: string) => activityApi.closePlan(planId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['activity-plan'] });
+      queryClient.invalidateQueries({ queryKey: ['activity-summary'] });
+    },
+  });
+}
+
+export function useUsersList(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ['users', 'all'],
+    queryFn: userApi.listUsers,
+    enabled: options?.enabled ?? true,
   });
 }
 

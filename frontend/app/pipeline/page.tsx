@@ -6,20 +6,7 @@ import { PlanInterviewModal } from '@/components/PlanInterviewModal';
 import Link from 'next/link';
 import type { Startup } from '@/lib/api';
 import { AddStartupSheet } from '@/components/AddStartupSheet';
-
-const STATUSES = [
-    'Lead',
-    'Contacted',
-    'Intro Secured',
-    'Call Booked',
-    'Meeting Scheduled',
-    'Interview Done',
-    'In Discussion',
-    'Activation Candidate',
-    'Closed Won',
-    'Closed Lost',
-    'Not a Fit'
-];
+import { PIPELINE_STATUSES } from '@/lib/pipeline-statuses';
 
 export default function PipelinePage() {
     const { data: startups, isLoading, error } = useStartups();
@@ -34,7 +21,7 @@ export default function PipelinePage() {
     const kanbanColumns = useMemo(() => {
         if (!startups) return {};
         const columns: Record<string, Startup[]> = {};
-        STATUSES.forEach(status => {
+        PIPELINE_STATUSES.forEach(status => {
             columns[status] = startups.filter(s => s.status === status);
         });
         return columns;
@@ -139,7 +126,7 @@ export default function PipelinePage() {
                 {/* Kanban View */}
                 <div className="overflow-x-auto pb-4">
                     <div className="flex gap-4 min-w-max">
-                        {STATUSES.map((status) => (
+                        {PIPELINE_STATUSES.map((status) => (
                             <div key={status} className="flex-shrink-0 w-80">
                                 <div className={`bg-card border rounded-lg shadow-sm transition-all ${dragOverColumn === status ? 'border-primary border-2 bg-primary/5' : 'border-border'
                                     }`}>

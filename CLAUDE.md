@@ -32,6 +32,171 @@ This is a Customer Validation App for Poblysh - a full-stack web application for
 - **Database**: PostgreSQL with SeaORM
 - **State Management**: TanStack Query (React Query)
 - **Styling**: Tailwind CSS with OKLCH color scheme
+- **Type Safety**: `oxide.ts` for Result and Option types (Rust-inspired patterns)
+
+## Type Safety System
+
+This project uses **strict type safety** with Rust-inspired patterns via `oxide.ts`.
+
+### Core Type-Safe Patterns
+
+#### Result Types for Fallible Operations
+Use `Result<T, E>` for operations that can fail (API calls, validation, parsing):
+
+```typescript
+import { match } from 'oxide.ts';
+import { apiWithResults } from '@/lib/api-with-results';
+
+// API calls return Result<Data, FetchError>
+const result = await apiWithResults.getStartups();
+
+match(result, {
+  Ok: (startups) => {
+    console.log('Success:', startups);
+    setStartups(startups);
+  },
+  Err: (error) => {
+    // Type-safe error handling
+    if (error.type === 'HTTP_ERROR' && error.status === 401) {
+      redirectToLogin();
+    } else if (error.type === 'NETWORK_ERROR') {
+      showOfflineMessage();
+    } else {
+      showError(formatFetchError(error));
+    }
+  },
+});
+```
+
+#### Option Types for Nullable Values
+Use `Option<T>` for nullable/optional data instead of `null` or `undefined`:
+
+```typescript
+import { match } from 'oxide.ts';
+import { fromNullable } from '@/lib/result-utils';
+
+// Convert nullable to Option
+const website = fromNullable(startup.website);
+
+// Pattern match for exhaustive handling
+match(website, {
+  Some: (url) => <a href={url}>{url}</a>,
+  None: () => <span className="text-gray-400">No website</span>,
+});
+
+// Or use map/unwrapOr for transformations
+const displayDate = fromNullable(startup.last_contact_date)
+  .map(date => new Date(date).toLocaleDateString())
+  .unwrapOr('Never');
+```
+
+#### Form Validation with Result Types
+Validation returns `ValidationResult<T>` which is `Result<T, ValidationError[]>`:
+
+```typescript
+import { match } from 'oxide.ts';
+import { validateStartupForm } from '@/lib/validation';
+
+const handleSubmit = async (formData) => {
+  const validationResult = validateStartupForm(formData);
+
+  match(validationResult, {
+    Ok: async (validData) => {
+      // Data is validated and typed
+      const createResult = await apiWithResults.createStartup(validData);
+      
+      match(createResult, {
+        Ok: (startup) => {
+          console.log('Created:', startup);
+          router.push(`/startups/${startup.id}`);
+        },
+        Err: (error) => showError(formatFetchError(error)),
+      });
+    },
+    Err: async (errors) => {
+      // IMPORTANT: Both branches must return same type
+      // If Ok is async, Err must be async too
+      const errorMap = {};
+      errors.forEach(err => errorMap[err.field] = err.message);
+      setFieldErrors(errorMap);
+    },
+  });
+};
+```
+
+### Banned Unsafe Patterns
+
+**❌ NEVER use these in the codebase:**
+
+```typescript
+// ❌ DON'T: Using 'any' type
+const data: any = await fetchData();
+
+// ✅ DO: Use specific types or Result
+const result = await safeFetch<Startup[]>('/api/startups');
+
+// ❌ DON'T: Non-null assertion
+const value = data.field!;
+
+// ✅ DO: Use Option type
+const value = fromNullable(data.field);
+
+// ❌ DON'T: try-catch for expected errors
+try {
+  const res = await fetch('/api/startups');
+  const data = await res.json();
+} catch (error) {
+  console.error(error);
+}
+
+// ✅ DO: Use Result type
+const result = await safeFetch<Startup[]>('/api/startups');
+match(result, {
+  Ok: (data) => handleSuccess(data),
+  Err: (error) => handleError(error),
+});
+
+// ❌ DON'T: @ts-ignore or @ts-expect-error
+// @ts-ignore
+const broken = somethingWrong();
+
+// ✅ DO: Fix the underlying type issue
+```
+
+### Important Type Rules
+
+1. **Match Branch Consistency**: All branches in `match()` must return the same type
+   - If `Ok` branch is async, `Err` branch must be async too
+   - If `Some` returns JSX, `None` must return JSX too
+
+2. **No Implicit Any**: TypeScript strict mode is enabled - all types must be explicit
+
+3. **Exhaustive Matching**: All cases must be handled (Ok/Err, Some/None)
+
+4. **Typed Errors**: Use specific error types (`FetchError`, `ValidationError[]`)
+
+### Available Utilities
+
+**`@/lib/result-utils.ts`:**
+- `safeFetch<T>(url, options)` - Type-safe fetch returning `Result<T, FetchError>`
+- `fromNullable<T>(value)` - Convert nullable to `Option<T>`
+- `validateEmail(email)` - Returns `Result<string, string>`
+- `validateRequired(value, fieldName)` - Returns `Result<T, string>`
+- `validateUrl(url)` - Returns `Result<string, string>`
+- `formatFetchError(error)` - User-friendly error messages
+
+**`@/lib/validation.ts`:**
+- `validateStartupForm(data)` - Returns `ValidationResult<ValidatedData>`
+- `validateContactForm(data)` - Returns `ValidationResult<ValidatedData>`
+- `validateInterviewForm(data)` - Returns `ValidationResult<ValidatedData>`
+- `getFieldError(errors, field)` - Extract specific field error
+- `hasFieldError(errors, field)` - Check if field has error
+
+**`@/lib/api-with-results.ts`:**
+- All API methods return `Result<Data, FetchError>`
+- Type-safe wrappers around the base API client
+- Automatic error handling and type conversion
+
 
 ## Common Development Commands
 

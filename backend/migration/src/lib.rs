@@ -8,6 +8,8 @@ mod m20250125_000004_seed_default_admin;
 mod m20250215_000005_rehash_admin_password;
 mod m20250306_000006_extend_outreach_log;
 mod m20250310_000007_contact_trash_and_owner;
+mod m20250320_000008_weekly_activity_tracking;
+mod m20250325_000009_create_email_conversations;
 
 pub struct Migrator;
 
@@ -23,6 +25,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20250215_000005_rehash_admin_password::Migration),
             Box::new(m20250306_000006_extend_outreach_log::Migration),
             Box::new(m20250310_000007_contact_trash_and_owner::Migration),
+            Box::new(m20250320_000008_weekly_activity_tracking::Migration),
+            Box::new(m20250325_000009_create_email_conversations::Migration),
         ]
     }
 }

@@ -194,7 +194,7 @@ impl MigrationTrait for Migration {
 }
 
 #[derive(DeriveIden)]
-enum Startup {
+pub enum Startup {
     Table,
     Id,
     Name,
@@ -210,7 +210,7 @@ enum Startup {
 }
 
 #[derive(DeriveIden)]
-enum Contact {
+pub enum Contact {
     Table,
     Id,
     StartupId,
@@ -224,7 +224,7 @@ enum Contact {
 }
 
 #[derive(DeriveIden)]
-enum OutreachLog {
+pub enum OutreachLog {
     Table,
     Id,
     StartupId,
@@ -240,7 +240,7 @@ enum OutreachLog {
 }
 
 #[derive(DeriveIden)]
-enum Interview {
+pub enum Interview {
     Table,
     Id,
     StartupId,
@@ -253,7 +253,7 @@ enum Interview {
 }
 
 #[derive(DeriveIden)]
-enum InterviewInsight {
+pub enum InterviewInsight {
     Table,
     Id,
     InterviewId,
@@ -273,7 +273,7 @@ enum InterviewInsight {
 }
 
 #[derive(DeriveIden)]
-enum WeeklySynthesis {
+pub enum WeeklySynthesis {
     Table,
     Id,
     WeekStartDate,

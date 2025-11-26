@@ -1,11 +1,18 @@
 'use client';
 
-import { useMemo } from 'react';
-import { useStartups } from '@/lib/hooks';
 import Link from 'next/link';
+import { match } from 'oxide.ts';
+import { useMemo } from 'react';
+import { useStartups, useWeeklyActivitySummary } from '@/lib/hooks';
+import { fromNullable } from '@/lib/result-utils';
 
 export default function DashboardPage() {
     const { data: startups, isLoading, error } = useStartups();
+    const {
+        data: activitySummary,
+        isLoading: summaryLoading,
+        error: activityError,
+    } = useWeeklyActivitySummary();
 
     // Calculate stats
     const stats = useMemo(() => {
@@ -19,7 +26,9 @@ export default function DashboardPage() {
         return { total: startups.length, byStatus };
     }, [startups]);
 
-    if (isLoading) {
+    const isDashboardLoading = isLoading || summaryLoading;
+
+    if (isDashboardLoading) {
         return (
             <div className="min-h-screen bg-background p-8">
                 <div className="max-w-7xl mx-auto">
@@ -73,7 +82,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Quick Actions */}
-                <div className="bg-card border border-border rounded-lg p-6 shadow-sm">
+                <div className="bg-card border border-border rounded-lg p-6 shadow-sm mb-8">
                     <h2 className="heading-medium mb-4">Quick Actions</h2>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <Link
@@ -97,6 +106,117 @@ export default function DashboardPage() {
                             <h3 className="font-medium text-foreground mb-1">Weekly Synthesis</h3>
                             <p className="body-light text-sm text-muted-foreground">Review insights and trends</p>
                         </Link>
+                    </div>
+                </div>
+
+                {activityError && (
+                    <div className="mb-6 border border-destructive/30 bg-destructive/5 text-destructive text-sm px-4 py-3 rounded-lg">
+                        Activity summary is unavailable right now.
+                    </div>
+                )}
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="bg-card border border-border rounded-lg p-6 shadow-sm">
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h2 className="heading-medium">Weekly Metrics</h2>
+                                <p className="text-sm text-muted-foreground">
+                                    Track goal vs. actual performance
+                                </p>
+                            </div>
+                            <Link href="/activity" className="text-sm text-primary hover:underline">
+                                View feed
+                            </Link>
+                        </div>
+                        {match(fromNullable(activitySummary?.current_plan), {
+                            Some: (plan) => (
+                                <>
+                                    <p className="text-xs text-muted-foreground mb-4">
+                                        Week of {new Date(plan.week_start).toLocaleDateString()} –{' '}
+                                        {new Date(plan.week_end).toLocaleDateString()} ({plan.status})
+                                    </p>
+                                    <div className="space-y-4">
+                                        {plan.metrics.map((metric) => {
+                                            const onTrack = metric.actual_value >= metric.target_value;
+                                            return (
+                                                <div
+                                                    key={metric.id ?? `${metric.name}-${metric.metric_type}`}
+                                                    className="flex items-start justify-between border border-border/60 rounded-lg p-3"
+                                                >
+                                                    <div>
+                                                        <p className="font-semibold text-foreground">{metric.name}</p>
+                                                        <p className="text-xs text-muted-foreground">
+                                                            {metric.metric_type === 'input'
+                                                                ? metric.unit_label
+                                                                : `Stage: ${metric.stage_name ?? 'N/A'}`}
+                                                        </p>
+                                                        {metric.owner_name && (
+                                                            <p className="text-xs text-muted-foreground mt-1">
+                                                                Owner: {metric.owner_name}
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-right">
+                                                        <p className="text-2xl font-bold text-foreground">
+                                                            {metric.actual_value}
+                                                        </p>
+                                                        <p
+                                                            className={`text-xs ${
+                                                                onTrack ? 'text-emerald-500' : 'text-muted-foreground'
+                                                            }`}
+                                                        >
+                                                            Target {metric.target_value} {metric.unit_label}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </>
+                            ),
+                            None: () => (
+                                <div className="text-sm text-muted-foreground">
+                                    No weekly plan configured yet. Admins can set goals under Activity Settings.
+                                </div>
+                            ),
+                        })}
+                    </div>
+
+                    <div className="bg-card border border-border rounded-lg p-6 shadow-sm">
+                        <div className="flex items-center justify-between mb-4">
+                            <div>
+                                <h2 className="heading-medium">Recent Activity</h2>
+                                <p className="text-sm text-muted-foreground">
+                                    Latest actions across the pipeline
+                                </p>
+                            </div>
+                            <Link href="/activity" className="text-sm text-primary hover:underline">
+                                View all
+                            </Link>
+                        </div>
+                        {activitySummary?.activity_preview?.length ? (
+                            <div className="space-y-4">
+                                {activitySummary.activity_preview.slice(0, 6).map((event) => (
+                                    <div
+                                        key={event.id}
+                                        className="border border-border/60 rounded-lg p-3"
+                                    >
+                                        <p className="font-medium text-foreground mb-1">{event.description}</p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {new Date(event.occurred_at).toLocaleString()}
+                                            {event.startup_name ? ` • ${event.startup_name}` : ''}
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                            {event.user_name || 'System'}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <p className="text-sm text-muted-foreground">
+                                No activity logged yet. Start by adding contacts or outreach records.
+                            </p>
+                        )}
                     </div>
                 </div>
             </div>

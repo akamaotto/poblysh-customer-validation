@@ -1,6 +1,8 @@
 mod auth;
+mod conversations_controller;
 mod email_service;
 mod entities;
+mod services;
 mod user_management;
 
 use axum::{
@@ -9,22 +11,29 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{Datelike, NaiveDate, Utc};
 use entities::{
-    contact, interview, interview_insight, outreach_log, startup, user, weekly_synthesis,
+    activity_event, contact, interview, interview_insight, outreach_log, startup, user,
+    weekly_activity_plan, weekly_metric_definition, weekly_synthesis,
 };
+use sea_orm::sea_query::extension::postgres::PgExpr;
+use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter,
-    QueryOrder, Set,
+    ActiveModelTrait, ColumnTrait, Condition, Database, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::net::SocketAddr;
+use tokio::time::{interval, Duration as TokioDuration};
 use tower_http::cors::CorsLayer;
 
 use uuid::Uuid;
 
 use crate::auth::middleware::{AdminUser, AuthUser};
 use crate::email_service::{EmailService, EmailServiceError, EmailTemplateKind};
+use crate::services::encryption_service::EncryptionService;
+use crate::services::imap_service::ImapService;
 
 #[derive(Clone)]
 struct AppState {
@@ -209,6 +218,163 @@ struct CreateWeeklySynthesisRequest {
     key_insights: String,
 }
 
+const PLAN_STATUS_DRAFT: &str = "draft";
+const PLAN_STATUS_ACTIVE: &str = "active";
+const PLAN_STATUS_CLOSED: &str = "closed";
+const METRIC_TYPE_INPUT: &str = "input";
+const METRIC_TYPE_OUTPUT: &str = "output";
+const ACTIVITY_CONTACT_CREATED: &str = "contact_created";
+const ACTIVITY_STARTUP_CREATED: &str = "startup_created";
+const ACTIVITY_OUTREACH_LOGGED: &str = "outreach_logged";
+const ACTIVITY_MEETING_LOGGED: &str = "meeting_logged";
+const ACTIVITY_STAGE_MOVED: &str = "stage_moved";
+const INPUT_ACTIVITY_TYPES: &[&str] = &[
+    ACTIVITY_CONTACT_CREATED,
+    ACTIVITY_STARTUP_CREATED,
+    ACTIVITY_OUTREACH_LOGGED,
+    ACTIVITY_MEETING_LOGGED,
+];
+
+#[derive(Deserialize)]
+struct WeeklyPlanUpsertRequest {
+    week_start: String,
+    metrics: Vec<WeeklyMetricInput>,
+}
+
+#[derive(Deserialize)]
+struct WeeklyMetricInput {
+    metric_type: String,
+    name: String,
+    unit_label: String,
+    owner_name: Option<String>,
+    owner_id: Option<Uuid>,
+    target_value: i32,
+    activity_type: Option<String>,
+    stage_name: Option<String>,
+    sort_order: Option<i32>,
+}
+
+#[derive(Deserialize, Default)]
+struct WeekQuery {
+    week_start: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ActivityFeedQuery {
+    page: Option<u32>,
+    page_size: Option<u32>,
+    search: Option<String>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    startup_id: Option<Uuid>,
+    contact_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+    stage: Option<String>,
+    activity_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WeeklyPlanResponse {
+    id: Option<Uuid>,
+    week_start: String,
+    week_end: String,
+    status: String,
+    metrics: Vec<WeeklyMetricResponse>,
+}
+
+#[derive(Serialize)]
+struct WeeklyMetricResponse {
+    id: Option<Uuid>,
+    metric_type: String,
+    name: String,
+    unit_label: String,
+    owner_name: Option<String>,
+    owner_id: Option<Uuid>,
+    target_value: i32,
+    actual_value: i32,
+    activity_type: Option<String>,
+    stage_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WeeklyActivitySummaryResponse {
+    current_plan: Option<WeeklyPlanResponse>,
+    activity_preview: Vec<ActivityEventResponse>,
+}
+
+#[derive(Serialize)]
+struct ActivityFeedResponse {
+    total: u64,
+    page: u32,
+    page_size: u32,
+    results: Vec<ActivityEventResponse>,
+}
+
+#[derive(Serialize)]
+struct ActivityEventResponse {
+    id: Uuid,
+    activity_type: String,
+    description: String,
+    occurred_at: String,
+    user_name: Option<String>,
+    startup_id: Option<Uuid>,
+    startup_name: Option<String>,
+    contact_id: Option<Uuid>,
+    contact_name: Option<String>,
+    stage_from: Option<String>,
+    stage_to: Option<String>,
+}
+
+struct ActivityEventInput {
+    activity_type: &'static str,
+    description: String,
+    user_id: Option<Uuid>,
+    user_name: Option<String>,
+    startup_id: Option<Uuid>,
+    startup_name: Option<String>,
+    contact_id: Option<Uuid>,
+    contact_name: Option<String>,
+    stage_from: Option<String>,
+    stage_to: Option<String>,
+    metadata: Option<serde_json::Value>,
+    occurred_at: Option<chrono::NaiveDateTime>,
+}
+
+impl From<activity_event::Model> for ActivityEventResponse {
+    fn from(model: activity_event::Model) -> Self {
+        ActivityEventResponse {
+            id: model.id,
+            activity_type: model.activity_type,
+            description: model.description,
+            occurred_at: model.occurred_at.and_utc().to_rfc3339(),
+            user_name: model.user_name,
+            startup_id: model.startup_id,
+            startup_name: model.startup_name,
+            contact_id: model.contact_id,
+            contact_name: model.contact_name,
+            stage_from: model.stage_from,
+            stage_to: model.stage_to,
+        }
+    }
+}
+
+impl From<weekly_metric_definition::Model> for WeeklyMetricResponse {
+    fn from(model: weekly_metric_definition::Model) -> Self {
+        WeeklyMetricResponse {
+            id: Some(model.id),
+            metric_type: model.metric_type,
+            name: model.name,
+            unit_label: model.unit_label,
+            owner_name: model.owner_name,
+            owner_id: model.owner_id,
+            target_value: model.target_value,
+            actual_value: model.actual_value,
+            activity_type: model.activity_type,
+            stage_name: model.stage_name,
+        }
+    }
+}
+
 async fn health_check() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -246,7 +412,7 @@ async fn get_startup(
 
 async fn create_startup(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
     Json(payload): Json<CreateStartupRequest>,
 ) -> Result<Json<startup::Model>, StatusCode> {
     let now = Utc::now().naive_utc();
@@ -270,12 +436,37 @@ async fn create_startup(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let startup_name = result.name.clone();
+    let startup_status = result.status.clone();
+
+    if let Err(err) = record_activity_event(
+        &state.db,
+        ActivityEventInput {
+            activity_type: ACTIVITY_STARTUP_CREATED,
+            description: format!("Added startup {}", startup_name),
+            user_id: Some(user.id),
+            user_name: Some(user_display_name(&user)),
+            startup_id: Some(result.id),
+            startup_name: Some(startup_name),
+            contact_id: None,
+            contact_name: None,
+            stage_from: None,
+            stage_to: Some(startup_status.clone()),
+            metadata: Some(json!({ "status": startup_status })),
+            occurred_at: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = ?err, "failed to record startup creation activity");
+    }
+
     Ok(Json(result))
 }
 
 async fn update_startup(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
     Json(payload): Json<CreateStartupRequest>,
 ) -> Result<Json<startup::Model>, StatusCode> {
@@ -285,18 +476,46 @@ async fn update_startup(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let previous_status = existing.status.clone();
     let mut active: startup::ActiveModel = existing.into();
     active.name = Set(payload.name);
     active.category = Set(payload.category);
     active.website = Set(payload.website);
     active.newsroom_url = Set(payload.newsroom_url);
-    active.status = Set(payload.status);
+    active.status = Set(payload.status.clone());
     active.updated_at = Set(Utc::now().naive_utc());
 
     let result = active
         .update(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if previous_status != result.status {
+        if let Err(err) = record_activity_event(
+            &state.db,
+            ActivityEventInput {
+                activity_type: ACTIVITY_STAGE_MOVED,
+                description: format!(
+                    "Moved {} from {} to {}",
+                    result.name, previous_status, result.status
+                ),
+                user_id: Some(user.id),
+                user_name: Some(user_display_name(&user)),
+                startup_id: Some(result.id),
+                startup_name: Some(result.name.clone()),
+                contact_id: None,
+                contact_name: None,
+                stage_from: Some(previous_status),
+                stage_to: Some(result.status.clone()),
+                metadata: None,
+                occurred_at: None,
+            },
+        )
+        .await
+        {
+            tracing::warn!(error = ?err, "failed to record stage move activity");
+        }
+    }
 
     Ok(Json(result))
 }
@@ -376,6 +595,30 @@ async fn create_contact(
         .insert(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let startup_name = lookup_startup_name(&state.db, inserted.startup_id).await;
+
+    if let Err(err) = record_activity_event(
+        &state.db,
+        ActivityEventInput {
+            activity_type: ACTIVITY_CONTACT_CREATED,
+            description: format!("Added contact {} ({})", inserted.name, inserted.role),
+            user_id: Some(user.id),
+            user_name: Some(user_display_name(&user)),
+            startup_id: Some(inserted.startup_id),
+            startup_name: startup_name.clone(),
+            contact_id: Some(inserted.id),
+            contact_name: Some(inserted.name.clone()),
+            stage_from: None,
+            stage_to: None,
+            metadata: Some(json!({ "contact_role": inserted.role })),
+            occurred_at: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = ?err, "failed to record contact creation activity");
+    }
 
     let response = load_contact_with_owner(&state.db, inserted.id).await?;
     Ok(Json(response))
@@ -627,7 +870,7 @@ async fn list_outreach_for_startup(
 
 async fn create_outreach_log(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
     Json(payload): Json<CreateOutreachLogRequest>,
 ) -> Result<Json<outreach_log::Model>, StatusCode> {
     let log = outreach_log::ActiveModel {
@@ -648,6 +891,35 @@ async fn create_outreach_log(
         .insert(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let startup_name = lookup_startup_name(&state.db, result.startup_id).await;
+    let contact_name = if let Some(contact_id) = result.contact_id {
+        lookup_contact_name(&state.db, contact_id).await
+    } else {
+        None
+    };
+
+    if let Err(err) = record_activity_event(
+        &state.db,
+        ActivityEventInput {
+            activity_type: ACTIVITY_OUTREACH_LOGGED,
+            description: format!("Logged {} outreach ({})", result.channel, result.direction),
+            user_id: Some(user.id),
+            user_name: Some(user_display_name(&user)),
+            startup_id: Some(result.startup_id),
+            startup_name: startup_name.clone(),
+            contact_id: result.contact_id,
+            contact_name,
+            stage_from: None,
+            stage_to: None,
+            metadata: Some(json!({ "outcome": result.outcome, "channel": result.channel })),
+            occurred_at: Some(result.date),
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = ?err, "failed to record outreach activity");
+    }
 
     Ok(Json(result))
 }
@@ -808,7 +1080,7 @@ async fn list_all_interviews(
 
 async fn create_interview(
     State(state): State<AppState>,
-    _auth_user: AuthUser,
+    AuthUser(user): AuthUser,
     Json(payload): Json<CreateInterviewRequest>,
 ) -> Result<Json<interview::Model>, StatusCode> {
     let date = chrono::NaiveDateTime::parse_from_str(&payload.date, "%Y-%m-%dT%H:%M:%S")
@@ -833,6 +1105,36 @@ async fn create_interview(
         .insert(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let startup_name = lookup_startup_name(&state.db, result.startup_id).await;
+
+    if let Err(err) = record_activity_event(
+        &state.db,
+        ActivityEventInput {
+            activity_type: ACTIVITY_MEETING_LOGGED,
+            description: format!(
+                "Logged {} with {}",
+                result.interview_type,
+                startup_name
+                    .clone()
+                    .unwrap_or_else(|| "startup".to_string())
+            ),
+            user_id: Some(user.id),
+            user_name: Some(user_display_name(&user)),
+            startup_id: Some(result.startup_id),
+            startup_name,
+            contact_id: result.contact_id,
+            contact_name: None,
+            stage_from: None,
+            stage_to: None,
+            metadata: Some(json!({ "date": result.date.to_string() })),
+            occurred_at: Some(result.date),
+        },
+    )
+    .await
+    {
+        tracing::warn!(error = ?err, "failed to record interview activity");
+    }
 
     Ok(Json(result))
 }
@@ -940,6 +1242,603 @@ async fn create_weekly_synthesis(
     Ok(Json(result))
 }
 
+async fn get_weekly_activity_plan(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    query: Option<Query<WeekQuery>>,
+) -> Result<Json<WeeklyPlanResponse>, StatusCode> {
+    let params = query.map(|q| q.0).unwrap_or_default();
+    let requested_date = params
+        .week_start
+        .as_deref()
+        .map(parse_date_str)
+        .transpose()?
+        .unwrap_or_else(|| Utc::now().date_naive());
+    let week_start = normalize_to_week_start(requested_date);
+    let week_end = compute_week_end(week_start);
+
+    let plan = weekly_activity_plan::Entity::find()
+        .filter(weekly_activity_plan::Column::WeekStart.eq(week_start))
+        .filter(weekly_activity_plan::Column::WeekEnd.eq(week_end))
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let response = if let Some(plan) = plan {
+        hydrate_plan_response(&state.db, plan)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        empty_plan_response(week_start)
+    };
+
+    Ok(Json(response))
+}
+
+async fn update_weekly_activity_plan(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Json(payload): Json<WeeklyPlanUpsertRequest>,
+) -> Result<Json<WeeklyPlanResponse>, StatusCode> {
+    if payload.metrics.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let requested_start = parse_date_str(&payload.week_start)?;
+    let week_start = normalize_to_week_start(requested_start);
+    let week_end = compute_week_end(week_start);
+    let status = determine_status_for_week(week_start, week_end);
+    let now = Utc::now().naive_utc();
+
+    let txn = state
+        .db
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let existing_plan = weekly_activity_plan::Entity::find()
+        .filter(weekly_activity_plan::Column::WeekStart.eq(week_start))
+        .filter(weekly_activity_plan::Column::WeekEnd.eq(week_end))
+        .one(&txn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let plan_model = if let Some(plan) = existing_plan {
+        let mut active: weekly_activity_plan::ActiveModel = plan.into();
+        active.status = Set(status.clone());
+        active.week_start = Set(week_start);
+        active.week_end = Set(week_end);
+        active.updated_at = Set(now);
+        active.closed_at = Set(if status == PLAN_STATUS_CLOSED {
+            Some(now)
+        } else {
+            None
+        });
+        active
+            .update(&txn)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        weekly_activity_plan::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            week_start: Set(week_start),
+            week_end: Set(week_end),
+            status: Set(status.clone()),
+            created_by: Set(Some(admin.id)),
+            created_at: Set(now),
+            updated_at: Set(now),
+            closed_at: Set(if status == PLAN_STATUS_CLOSED {
+                Some(now)
+            } else {
+                None
+            }),
+        }
+        .insert(&txn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    weekly_metric_definition::Entity::delete_many()
+        .filter(weekly_metric_definition::Column::PlanId.eq(plan_model.id))
+        .exec(&txn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for (idx, metric) in payload.metrics.iter().enumerate() {
+        let metric_type = metric.metric_type.trim().to_lowercase();
+        let name = metric.name.trim().to_string();
+        let unit_label = metric.unit_label.trim().to_string();
+        let target_value = metric.target_value.max(0);
+        let owner_name = metric
+            .owner_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let activity_type = metric
+            .activity_type
+            .as_ref()
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty());
+        let stage_name = metric
+            .stage_name
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        if name.is_empty() || unit_label.is_empty() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        if metric_type != METRIC_TYPE_INPUT && metric_type != METRIC_TYPE_OUTPUT {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        if metric_type == METRIC_TYPE_INPUT {
+            let Some(ref event_key) = activity_type else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
+            if !INPUT_ACTIVITY_TYPES.contains(&event_key.as_str()) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+
+        if metric_type == METRIC_TYPE_OUTPUT && stage_name.is_none() {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+
+        weekly_metric_definition::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            plan_id: Set(plan_model.id),
+            metric_type: Set(metric_type),
+            name: Set(name),
+            unit_label: Set(unit_label),
+            owner_name: Set(owner_name.clone()),
+            owner_id: Set(metric.owner_id),
+            target_value: Set(target_value),
+            actual_value: Set(0),
+            activity_type: Set(activity_type.clone()),
+            stage_name: Set(stage_name.clone()),
+            sort_order: Set(metric.sort_order.unwrap_or(idx as i32)),
+            created_at: Set(now),
+            updated_at: Set(now),
+        }
+        .insert(&txn)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    txn.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let response = hydrate_plan_response(&state.db, plan_model)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(response))
+}
+
+async fn close_weekly_activity_plan(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<WeeklyPlanResponse>, StatusCode> {
+    let plan = weekly_activity_plan::Entity::find_by_id(plan_id)
+        .one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let closed = mark_plan_closed(&state.db, plan)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let response = hydrate_plan_response(&state.db, closed)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(response))
+}
+
+async fn get_weekly_activity_summary(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+) -> Result<Json<WeeklyActivitySummaryResponse>, StatusCode> {
+    let today = Utc::now().date_naive();
+    let plan = find_plan_covering_date(&state.db, today)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let current_plan = if let Some(plan) = plan {
+        Some(
+            hydrate_plan_response(&state.db, plan)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
+    } else {
+        None
+    };
+
+    let preview = activity_event::Entity::find()
+        .order_by_desc(activity_event::Column::OccurredAt)
+        .limit(20)
+        .all(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(WeeklyActivitySummaryResponse {
+        current_plan,
+        activity_preview: preview
+            .into_iter()
+            .map(ActivityEventResponse::from)
+            .collect(),
+    }))
+}
+
+async fn list_activity_feed(
+    State(state): State<AppState>,
+    _auth_user: AuthUser,
+    query: Option<Query<ActivityFeedQuery>>,
+) -> Result<Json<ActivityFeedResponse>, StatusCode> {
+    let ActivityFeedQuery {
+        page,
+        page_size,
+        search,
+        start_date,
+        end_date,
+        startup_id,
+        contact_id,
+        user_id,
+        stage,
+        activity_type,
+    } = query.map(|q| q.0).unwrap_or_default();
+
+    let mut filters = Condition::all();
+
+    if let Some(startup_id) = startup_id {
+        filters = filters.add(activity_event::Column::StartupId.eq(startup_id));
+    }
+    if let Some(contact_id) = contact_id {
+        filters = filters.add(activity_event::Column::ContactId.eq(contact_id));
+    }
+    if let Some(user_id) = user_id {
+        filters = filters.add(activity_event::Column::UserId.eq(user_id));
+    }
+    if let Some(activity_type) = activity_type {
+        if !activity_type.trim().is_empty() {
+            filters = filters.add(activity_event::Column::ActivityType.eq(activity_type));
+        }
+    }
+    if let Some(stage_value) = stage {
+        if !stage_value.trim().is_empty() {
+            filters = filters.add(activity_event::Column::StageTo.eq(stage_value));
+        }
+    }
+
+    if let Some(start) = start_date.as_deref() {
+        let date = parse_date_str(start)?;
+        let start_dt = date.and_hms_opt(0, 0, 0).unwrap();
+        filters = filters.add(activity_event::Column::OccurredAt.gte(start_dt));
+    }
+
+    if let Some(end) = end_date.as_deref() {
+        let date = parse_date_str(end)?;
+        let end_dt = date.and_hms_opt(23, 59, 59).unwrap();
+        filters = filters.add(activity_event::Column::OccurredAt.lte(end_dt));
+    }
+
+    if let Some(search_value) = search {
+        let trimmed = search_value.trim();
+        if !trimmed.is_empty() {
+            let pattern = format!("%{}%", trimmed);
+            filters = filters.add(
+                Condition::any()
+                    .add(Expr::col(activity_event::Column::Description).ilike(pattern.clone()))
+                    .add(Expr::col(activity_event::Column::StartupName).ilike(pattern.clone()))
+                    .add(Expr::col(activity_event::Column::ContactName).ilike(pattern.clone()))
+                    .add(Expr::col(activity_event::Column::UserName).ilike(pattern)),
+            );
+        }
+    }
+
+    let page = page.unwrap_or(1).max(1);
+    let page_size = page_size.unwrap_or(20).clamp(10, 100);
+
+    let base_query = activity_event::Entity::find()
+        .filter(filters)
+        .order_by_desc(activity_event::Column::OccurredAt);
+
+    let paginator = base_query.paginate(&state.db, page_size as u64);
+
+    let total = paginator
+        .num_items()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let events = paginator
+        .fetch_page((page - 1) as u64)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ActivityFeedResponse {
+        total,
+        page,
+        page_size,
+        results: events
+            .into_iter()
+            .map(ActivityEventResponse::from)
+            .collect(),
+    }))
+}
+
+async fn record_activity_event(
+    db: &DatabaseConnection,
+    input: ActivityEventInput,
+) -> Result<(), sea_orm::DbErr> {
+    let occurred_at = input.occurred_at.unwrap_or_else(|| Utc::now().naive_utc());
+    let stage_to = input.stage_to.clone();
+    let activity_date = occurred_at.date();
+    let event = activity_event::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        activity_type: Set(input.activity_type.to_string()),
+        description: Set(input.description),
+        occurred_at: Set(occurred_at),
+        user_id: Set(input.user_id),
+        user_name: Set(input.user_name),
+        startup_id: Set(input.startup_id),
+        startup_name: Set(input.startup_name),
+        contact_id: Set(input.contact_id),
+        contact_name: Set(input.contact_name),
+        stage_from: Set(input.stage_from),
+        stage_to: Set(stage_to.clone()),
+        metadata: Set(input.metadata),
+        created_at: Set(Utc::now().naive_utc()),
+    };
+
+    event.insert(db).await?;
+
+    if let Err(err) =
+        increment_metrics_for_event(db, input.activity_type, stage_to.as_deref(), activity_date)
+            .await
+    {
+        tracing::warn!(
+            error = ?err,
+            "failed to update weekly metrics after recording activity event"
+        );
+    }
+
+    Ok(())
+}
+
+async fn increment_metrics_for_event(
+    db: &DatabaseConnection,
+    activity_type: &'static str,
+    stage_to: Option<&str>,
+    activity_date: NaiveDate,
+) -> Result<(), sea_orm::DbErr> {
+    let Some(plan) = find_plan_covering_date(db, activity_date).await? else {
+        return Ok(());
+    };
+    let plan = ensure_plan_active_for_date(db, plan, activity_date).await?;
+
+    let metrics = weekly_metric_definition::Entity::find()
+        .filter(weekly_metric_definition::Column::PlanId.eq(plan.id))
+        .all(db)
+        .await?;
+
+    for metric in metrics {
+        let should_increment = if metric.metric_type == METRIC_TYPE_INPUT {
+            metric
+                .activity_type
+                .as_deref()
+                .map(|value| value == activity_type)
+                .unwrap_or(false)
+        } else if metric.metric_type == METRIC_TYPE_OUTPUT {
+            stage_to
+                .and_then(|stage| metric.stage_name.as_deref().map(|value| value == stage))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if should_increment {
+            let mut active: weekly_metric_definition::ActiveModel = metric.clone().into();
+            active.actual_value = Set(metric.actual_value + 1);
+            active.updated_at = Set(Utc::now().naive_utc());
+            active.update(db).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn find_plan_covering_date(
+    db: &DatabaseConnection,
+    date: NaiveDate,
+) -> Result<Option<weekly_activity_plan::Model>, sea_orm::DbErr> {
+    weekly_activity_plan::Entity::find()
+        .filter(
+            Condition::all()
+                .add(weekly_activity_plan::Column::WeekStart.lte(date))
+                .add(weekly_activity_plan::Column::WeekEnd.gte(date)),
+        )
+        .order_by_desc(weekly_activity_plan::Column::WeekStart)
+        .one(db)
+        .await
+}
+
+async fn ensure_plan_active_for_date(
+    db: &DatabaseConnection,
+    plan: weekly_activity_plan::Model,
+    date: NaiveDate,
+) -> Result<weekly_activity_plan::Model, sea_orm::DbErr> {
+    if plan.status == PLAN_STATUS_ACTIVE || plan.status == PLAN_STATUS_CLOSED {
+        return Ok(plan);
+    }
+
+    if date < plan.week_start || date > plan.week_end {
+        return Ok(plan);
+    }
+
+    let mut active: weekly_activity_plan::ActiveModel = plan.into();
+    active.status = Set(PLAN_STATUS_ACTIVE.to_string());
+    active.updated_at = Set(Utc::now().naive_utc());
+    active.closed_at = Set(None);
+    active.update(db).await
+}
+
+async fn fetch_metrics_for_plan(
+    db: &DatabaseConnection,
+    plan_id: Uuid,
+) -> Result<Vec<weekly_metric_definition::Model>, sea_orm::DbErr> {
+    weekly_metric_definition::Entity::find()
+        .filter(weekly_metric_definition::Column::PlanId.eq(plan_id))
+        .order_by_asc(weekly_metric_definition::Column::SortOrder)
+        .order_by_asc(weekly_metric_definition::Column::CreatedAt)
+        .all(db)
+        .await
+}
+
+async fn hydrate_plan_response(
+    db: &DatabaseConnection,
+    plan: weekly_activity_plan::Model,
+) -> Result<WeeklyPlanResponse, sea_orm::DbErr> {
+    let metrics = fetch_metrics_for_plan(db, plan.id).await?;
+    Ok(WeeklyPlanResponse {
+        id: Some(plan.id),
+        week_start: plan.week_start.to_string(),
+        week_end: plan.week_end.to_string(),
+        status: plan.status,
+        metrics: metrics
+            .into_iter()
+            .map(WeeklyMetricResponse::from)
+            .collect(),
+    })
+}
+
+fn empty_plan_response(week_start: NaiveDate) -> WeeklyPlanResponse {
+    let week_end = compute_week_end(week_start);
+    WeeklyPlanResponse {
+        id: None,
+        week_start: week_start.to_string(),
+        week_end: week_end.to_string(),
+        status: PLAN_STATUS_DRAFT.to_string(),
+        metrics: Vec::new(),
+    }
+}
+
+fn normalize_to_week_start(date: NaiveDate) -> NaiveDate {
+    let offset = date.weekday().num_days_from_monday() as i64;
+    date - chrono::Duration::days(offset)
+}
+
+fn compute_week_end(week_start: NaiveDate) -> NaiveDate {
+    week_start + chrono::Duration::days(6)
+}
+
+fn determine_status_for_week(week_start: NaiveDate, week_end: NaiveDate) -> String {
+    let today = Utc::now().date_naive();
+    if today < week_start {
+        PLAN_STATUS_DRAFT.to_string()
+    } else if today > week_end {
+        PLAN_STATUS_CLOSED.to_string()
+    } else {
+        PLAN_STATUS_ACTIVE.to_string()
+    }
+}
+
+async fn lookup_startup_name(db: &DatabaseConnection, startup_id: Uuid) -> Option<String> {
+    startup::Entity::find_by_id(startup_id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|model| model.name)
+}
+
+async fn lookup_contact_name(db: &DatabaseConnection, contact_id: Uuid) -> Option<String> {
+    contact::Entity::find_by_id(contact_id)
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|model| model.name)
+}
+
+fn user_display_name(user: &user::Model) -> String {
+    user.name.clone().unwrap_or_else(|| user.email.clone())
+}
+
+fn parse_date_str(value: &str) -> Result<NaiveDate, StatusCode> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+async fn mark_plan_closed(
+    db: &DatabaseConnection,
+    plan: weekly_activity_plan::Model,
+) -> Result<weekly_activity_plan::Model, sea_orm::DbErr> {
+    if plan.status == PLAN_STATUS_CLOSED {
+        return Ok(plan);
+    }
+
+    let mut active: weekly_activity_plan::ActiveModel = plan.into();
+    let now = Utc::now().naive_utc();
+    active.status = Set(PLAN_STATUS_CLOSED.to_string());
+    active.closed_at = Set(Some(now));
+    active.updated_at = Set(now);
+    active.update(db).await
+}
+
+async fn close_completed_weeks(db: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
+    let today = Utc::now().date_naive();
+    let plans = weekly_activity_plan::Entity::find()
+        .filter(weekly_activity_plan::Column::Status.ne(PLAN_STATUS_CLOSED))
+        .filter(weekly_activity_plan::Column::WeekEnd.lt(today))
+        .all(db)
+        .await?;
+
+    for plan in plans {
+        let _ = mark_plan_closed(db, plan).await?;
+    }
+
+    Ok(())
+}
+
+fn spawn_weekly_plan_scheduler(db: DatabaseConnection) {
+    tokio::spawn(async move {
+        if let Err(err) = close_completed_weeks(&db).await {
+            tracing::warn!(
+                error = ?err,
+                "failed to close past weekly plans on scheduler startup"
+            );
+        }
+
+        let mut ticker = interval(TokioDuration::from_secs(60 * 60));
+        loop {
+            ticker.tick().await;
+            if let Err(err) = close_completed_weeks(&db).await {
+                tracing::warn!(
+                    error = ?err,
+                    "failed to close past weekly plans during scheduled sweep"
+                );
+            }
+        }
+    });
+}
+
+fn spawn_email_sync_scheduler(db: DatabaseConnection) {
+    tokio::spawn(async move {
+        let encryption_service = EncryptionService::new();
+        let imap_service = ImapService::new(db.clone(), encryption_service);
+        let mut ticker = interval(TokioDuration::from_secs(60 * 5));
+        loop {
+            ticker.tick().await;
+            if let Err(err) = imap_service.sync_all_users().await {
+                tracing::warn!(error = %err, "failed to run inbox sync");
+            }
+        }
+    });
+}
+
 fn truncate_preview(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.len() <= 240 {
@@ -991,7 +1890,13 @@ async fn main() {
 
     let email_service = EmailService::from_env();
 
-    let state = AppState { db, email_service };
+    let state = AppState {
+        db: db.clone(),
+        email_service,
+    };
+
+    spawn_weekly_plan_scheduler(state.db.clone());
+    spawn_email_sync_scheduler(state.db.clone());
 
     // Build CORS layer
     // Note: Cannot use Any wildcards with allow_credentials(true)
@@ -1098,10 +2003,77 @@ async fn main() {
             get(get_insight_for_interview).post(create_interview_insight),
         )
         // WeeklySynthesis routes
+        .route("/api/weekly-synthesis", post(create_weekly_synthesis))
+        // Email & Conversations
         .route(
-            "/api/weekly-synthesis",
-            get(list_weekly_syntheses).post(create_weekly_synthesis),
+            "/api/admin/email-config",
+            get(conversations_controller::list_admin_email_configs)
+                .post(conversations_controller::save_admin_email_config),
         )
+        .route(
+            "/api/email/config",
+            get(conversations_controller::get_email_config)
+                .post(conversations_controller::save_email_config),
+        )
+        .route(
+            "/api/email/config/test",
+            post(conversations_controller::test_email_credentials),
+        )
+        .route(
+            "/api/email/sync",
+            post(conversations_controller::sync_emails),
+        )
+        .route(
+            "/api/user/email-status",
+            get(conversations_controller::get_email_status),
+        )
+        .route(
+            "/api/conversations",
+            get(conversations_controller::list_conversations),
+        )
+        .route(
+            "/api/conversations/:id",
+            get(conversations_controller::get_conversation),
+        )
+        .route(
+            "/api/conversations/:id/reply",
+            post(conversations_controller::reply_to_conversation),
+        )
+        .route(
+            "/api/conversations/:id/forward",
+            post(conversations_controller::forward_conversation),
+        )
+        .route(
+            "/api/conversations/:id/mark-read",
+            post(conversations_controller::mark_conversation_read),
+        )
+        .route(
+            "/api/conversations/:id/mark-unread",
+            post(conversations_controller::mark_conversation_unread),
+        )
+        .route(
+            "/api/conversations/:id/archive",
+            post(conversations_controller::archive_conversation),
+        )
+        .route(
+            "/api/conversations/:id/unarchive",
+            post(conversations_controller::unarchive_conversation),
+        )
+        .route(
+            "/api/conversations/:id/attachments/:attachment_id",
+            get(conversations_controller::download_attachment),
+        )
+        // Activity tracking routes
+        .route(
+            "/api/activity/plan",
+            get(get_weekly_activity_plan).put(update_weekly_activity_plan),
+        )
+        .route(
+            "/api/activity/plan/:id/close",
+            post(close_weekly_activity_plan),
+        )
+        .route("/api/activity/summary", get(get_weekly_activity_summary))
+        .route("/api/activity/feed", get(list_activity_feed))
         .layer(cors)
         .with_state(state);
 
